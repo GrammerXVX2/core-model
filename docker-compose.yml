@@ -12,16 +12,16 @@ services:
       - --dtype
       - half
       - --max-model-len
-      - "12288"
+      - "10240"
       - --gpu-memory-utilization
-      - "0.45"
+      - "0.55"
       - --kv-cache-dtype
       - fp8
       - --disable-custom-all-reduce
       - --swap-space
       - "8"
       - --max-num-seqs
-      - "2"
+      - "4"
       - --max-num-batched-tokens
       - "2048"
       - --enable-chunked-prefill
@@ -56,7 +56,7 @@ services:
       - --gpu-memory-utilization
       - "0.55"
       - --max-num-seqs
-      - "2"
+      - "4"
       - --max-num-batched-tokens
       - "2048"
     environment:
@@ -77,13 +77,20 @@ services:
     environment:
       - VLLM_BASE_URLS=http://vllm-gpu0:8000/v1
       - VLLM_MODEL=Qwen/Qwen3.5-9B
+      - VLLM_CHAT_BASE_URL=http://vllm-gpu0:8000/v1
+      - QWEN_CHAT_MODEL=Qwen/Qwen3.5-9B
+      - QWEN_CHAT_BASE_URL=http://vllm-gpu0:8000/v1
+      - MINISTRAL_CHAT_MODEL=Ministral-3-14B
+      - MINISTRAL_CHAT_BASE_URL=http://10.77.166.156:8000/v1
       - VLLM_EMBED_BASE_URL=http://vllm-embed-gpu1:8000/v1
       - VLLM_EMBED_MODEL=${VLLM_EMBED_MODEL:-Qwen/Qwen3.5-4B}
+      - QWEN_EMBED_MODEL=${VLLM_EMBED_MODEL:-Qwen/Qwen3.5-4B}
+      - QWEN_EMBED_BASE_URL=http://vllm-embed-gpu1:8000/v1
       - DEFAULT_RESPONSE_LANGUAGE=ru
       - DISABLE_THINKING=1
       - VLLM_DEFAULT_MAX_TOKENS=512
       - VLLM_MAX_TOKENS_CAP=1024
-      - VLLM_MAX_CONTEXT_TOKENS=12288
+      - VLLM_MAX_CONTEXT_TOKENS=10240
       - VLLM_MIN_CONTEXT_HEADROOM=256
       - PROXY_PORT=11434
     depends_on:

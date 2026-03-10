@@ -2,13 +2,14 @@ import os
 import json
 import time
 import logging
+import asyncio
 from datetime import datetime, timezone
-from itertools import cycle
 from typing import Any, Dict, List, Optional, Union
 from urllib.parse import parse_qs
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 app = FastAPI(
@@ -22,6 +23,7 @@ app = FastAPI(
         {"name": "chat", "description": "Chat-style text generation."},
         {"name": "generate", "description": "Prompt-style text generation."},
         {"name": "embeddings", "description": "Text embedding endpoints."},
+        {"name": "models", "description": "Model registry and availability status."},
     ],
 )
 
@@ -94,24 +96,51 @@ class EmbedResponseModel(BaseModel):
     prompt_eval_count: int
 
 
+class ModelStatusItem(BaseModel):
+    model: str
+    model_vllm: str
+    type: str
+    base_url: str
+    max_context_tokens: int
+    status: str
+    detail: str = ""
+
+
 CHAT_OPENAPI_EXTRA = {
     "requestBody": {
         "required": True,
         "content": {
             "application/json": {
-                "schema": {"$ref": "#/components/schemas/ChatRequestModel"},
-                "example": {
-                    "model": os.getenv("OPENAPI_CHAT_EXAMPLE_MODEL", os.getenv("VLLM_MODEL", "Qwen/Qwen3.5-9B")),
-                    "temperature": 0,
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": os.getenv(
-                                "OPENAPI_CHAT_EXAMPLE_CONTENT",
-                                "Выбери лучший документ по запросу и ответь JSON.",
-                            ),
-                        }
-                    ],
+                "examples": {
+                    "qwen_chat": {
+                        "summary": "Qwen chat route",
+                        "value": {
+                            "model": os.getenv("OPENAPI_CHAT_EXAMPLE_MODEL", "Qwen3.5-9B"),
+                            "temperature": 0,
+                            "messages": [
+                                {
+                                    "role": "user",
+                                    "content": os.getenv(
+                                        "OPENAPI_CHAT_EXAMPLE_CONTENT",
+                                        "Выбери лучший документ по запросу и ответь JSON.",
+                                    ),
+                                }
+                            ],
+                        },
+                    },
+                    "ministral_chat": {
+                        "summary": "Ministral chat route",
+                        "value": {
+                            "model": "Ministral3-14B",
+                            "temperature": 0.2,
+                            "messages": [
+                                {
+                                    "role": "user",
+                                    "content": "Кратко объясни разницу между договором и офертой.",
+                                }
+                            ],
+                        },
+                    },
                 },
             }
         },
@@ -123,14 +152,26 @@ GENERATE_OPENAPI_EXTRA = {
         "required": True,
         "content": {
             "application/json": {
-                "schema": {"$ref": "#/components/schemas/GenerateRequestModel"},
-                "example": {
-                    "model": os.getenv("OPENAPI_GENERATE_EXAMPLE_MODEL", os.getenv("VLLM_MODEL", "Qwen/Qwen3.5-9B")),
-                    "prompt": os.getenv(
-                        "OPENAPI_GENERATE_EXAMPLE_PROMPT",
-                        "Кратко объясни, как работает OAuth2 в FastAPI.",
-                    ),
-                    "temperature": 0,
+                "examples": {
+                    "qwen_generate": {
+                        "summary": "Qwen generate route",
+                        "value": {
+                            "model": os.getenv("OPENAPI_GENERATE_EXAMPLE_MODEL", "Qwen3.5-9B"),
+                            "prompt": os.getenv(
+                                "OPENAPI_GENERATE_EXAMPLE_PROMPT",
+                                "Кратко объясни, как работает OAuth2 в FastAPI.",
+                            ),
+                            "temperature": 0,
+                        },
+                    },
+                    "ministral_generate": {
+                        "summary": "Ministral generate route",
+                        "value": {
+                            "model": "Ministral3-14B",
+                            "prompt": "Сформулируй краткое определение понятия сервитута.",
+                            "temperature": 0.2,
+                        },
+                    },
                 },
             }
         },
@@ -142,8 +183,8 @@ EMBED_OPENAPI_EXTRA = {
         "required": True,
         "content": {
             "application/json": {
-                "schema": {"$ref": "#/components/schemas/EmbedRequestModel"},
                 "example": {
+                    "model": os.getenv("OPENAPI_EMBED_EXAMPLE_MODEL", "Qwen3.5-4B"),
                     "input": json.loads(
                         os.getenv(
                             "OPENAPI_EMBED_EXAMPLE_INPUT_JSON",
@@ -161,10 +202,22 @@ VLLM_BASE_URLS = [
     for url in os.getenv("VLLM_BASE_URLS", os.getenv("VLLM_BASE_URL", "http://localhost:8000/v1")).split(",")
     if url.strip()
 ]
-_BASE_URL_CYCLE = cycle(VLLM_BASE_URLS)
 VLLM_MODEL = os.getenv("VLLM_MODEL", "Qwen/Qwen3.5-9B")
 VLLM_EMBED_BASE_URL = os.getenv("VLLM_EMBED_BASE_URL", VLLM_BASE_URLS[0])
 VLLM_EMBED_MODEL = os.getenv("VLLM_EMBED_MODEL", "Qwen/Qwen3.5-4B")
+
+# Model routing config.
+DEFAULT_CHAT_BASE_URL = os.getenv("VLLM_CHAT_BASE_URL", VLLM_BASE_URLS[0])
+QWEN_CHAT_MODEL = os.getenv("QWEN_CHAT_MODEL", "Qwen/Qwen3.5-9B")
+QWEN_CHAT_BASE_URL = os.getenv("QWEN_CHAT_BASE_URL", DEFAULT_CHAT_BASE_URL)
+MINISTRAL_CHAT_MODEL = os.getenv("MINISTRAL_CHAT_MODEL", "Ministral-3-14B")
+MINISTRAL_CHAT_BASE_URL = os.getenv("MINISTRAL_CHAT_BASE_URL", DEFAULT_CHAT_BASE_URL)
+QWEN_EMBED_MODEL = os.getenv("QWEN_EMBED_MODEL", VLLM_EMBED_MODEL)
+QWEN_EMBED_BASE_URL = os.getenv("QWEN_EMBED_BASE_URL", VLLM_EMBED_BASE_URL)
+QWEN_CHAT_MAX_CONTEXT_TOKENS = int(os.getenv("QWEN_CHAT_MAX_CONTEXT_TOKENS", os.getenv("VLLM_MAX_CONTEXT_TOKENS", "10240")))
+MINISTRAL_CHAT_MAX_CONTEXT_TOKENS = int(os.getenv("MINISTRAL_CHAT_MAX_CONTEXT_TOKENS", "8192"))
+QWEN_EMBED_MAX_CONTEXT_TOKENS = int(os.getenv("QWEN_EMBED_MAX_CONTEXT_TOKENS", "8192"))
+
 DEFAULT_RESPONSE_LANGUAGE = os.getenv("DEFAULT_RESPONSE_LANGUAGE", "ru")
 DISABLE_THINKING = os.getenv("DISABLE_THINKING", "1") == "1"
 DEFAULT_MAX_TOKENS = int(os.getenv("VLLM_DEFAULT_MAX_TOKENS", "256"))
@@ -325,8 +378,178 @@ def _ns() -> int:
     return time.perf_counter_ns()
 
 
-def _next_base_url() -> str:
-    return next(_BASE_URL_CYCLE)
+def _normalize_model_name(name: str) -> str:
+    return "".join(ch for ch in name.lower() if ch.isalnum())
+
+
+def _is_qwen_chat_alias(name: str) -> bool:
+    n = _normalize_model_name(name)
+    return "qwen" in n and "35" in n and "9b" in n
+
+
+def _is_qwen_embed_alias(name: str) -> bool:
+    n = _normalize_model_name(name)
+    return "qwen" in n and ("4b" in n or "embedding" in n)
+
+
+def _is_ministral_alias(name: str) -> bool:
+    n = _normalize_model_name(name)
+    return "ministral" in n and "14b" in n
+
+
+def _resolve_default_chat_route() -> Dict[str, str]:
+    if _is_ministral_alias(VLLM_MODEL):
+        return {
+            "public_model": MINISTRAL_CHAT_MODEL,
+            "vllm_model": MINISTRAL_CHAT_MODEL,
+            "base_url": MINISTRAL_CHAT_BASE_URL,
+            "type": "chat",
+        }
+    return {
+        "public_model": QWEN_CHAT_MODEL,
+        "vllm_model": QWEN_CHAT_MODEL,
+        "base_url": QWEN_CHAT_BASE_URL,
+        "type": "chat",
+    }
+
+
+def _resolve_chat_target(requested_model: Optional[str]) -> Dict[str, str]:
+    requested = (requested_model or "").strip()
+    if not requested:
+        return _resolve_default_chat_route()
+
+    if _is_qwen_chat_alias(requested) or _normalize_model_name(requested) == _normalize_model_name(QWEN_CHAT_MODEL):
+        return {
+            "public_model": "Qwen3.5-9B",
+            "vllm_model": QWEN_CHAT_MODEL,
+            "base_url": QWEN_CHAT_BASE_URL,
+            "type": "chat",
+        }
+
+    if _is_ministral_alias(requested) or _normalize_model_name(requested) == _normalize_model_name(MINISTRAL_CHAT_MODEL):
+        return {
+            "public_model": "Ministral3-14B",
+            "vllm_model": MINISTRAL_CHAT_MODEL,
+            "base_url": MINISTRAL_CHAT_BASE_URL,
+            "type": "chat",
+        }
+
+    if _is_qwen_embed_alias(requested):
+        raise HTTPException(status_code=400, detail="model does not support chat endpoint: Qwen3.5-4B")
+
+    raise HTTPException(
+        status_code=400,
+        detail="unsupported model for chat; allowed: Qwen3.5-9B, Ministral3-14B",
+    )
+
+
+def _resolve_embed_target(requested_model: Optional[str]) -> Dict[str, str]:
+    requested = (requested_model or "").strip()
+
+    if EMBED_FORCE_MODEL:
+        return {
+            "public_model": "Qwen3.5-4B",
+            "vllm_model": QWEN_EMBED_MODEL,
+            "base_url": QWEN_EMBED_BASE_URL,
+            "type": "embeddings",
+        }
+
+    if not requested:
+        return {
+            "public_model": "Qwen3.5-4B",
+            "vllm_model": QWEN_EMBED_MODEL,
+            "base_url": QWEN_EMBED_BASE_URL,
+            "type": "embeddings",
+        }
+
+    if _is_qwen_embed_alias(requested) or _normalize_model_name(requested) == _normalize_model_name(QWEN_EMBED_MODEL):
+        return {
+            "public_model": "Qwen3.5-4B",
+            "vllm_model": QWEN_EMBED_MODEL,
+            "base_url": QWEN_EMBED_BASE_URL,
+            "type": "embeddings",
+        }
+
+    if _is_qwen_chat_alias(requested) or _is_ministral_alias(requested):
+        raise HTTPException(status_code=400, detail=f"model does not support embeddings endpoint: {requested}")
+
+    raise HTTPException(
+        status_code=400,
+        detail="unsupported model for embeddings; allowed: Qwen3.5-4B",
+    )
+
+
+async def _probe_model_status(
+    public_model: str,
+    vllm_model: str,
+    model_type: str,
+    base_url: str,
+    max_context_tokens: int,
+) -> Dict[str, Union[str, int]]:
+    url = f"{base_url.rstrip('/')}/models"
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.get(url)
+    except Exception as exc:
+        return {
+            "model": public_model,
+            "model_vllm": vllm_model,
+            "type": model_type,
+            "base_url": base_url,
+            "max_context_tokens": max_context_tokens,
+            "status": "недоступен",
+            "detail": f"connection error: {str(exc)}",
+        }
+
+    if resp.status_code >= 400:
+        return {
+            "model": public_model,
+            "model_vllm": vllm_model,
+            "type": model_type,
+            "base_url": base_url,
+            "max_context_tokens": max_context_tokens,
+            "status": "недоступен",
+            "detail": f"http {resp.status_code}",
+        }
+
+    try:
+        data = resp.json()
+    except Exception:
+        return {
+            "model": public_model,
+            "model_vllm": vllm_model,
+            "type": model_type,
+            "base_url": base_url,
+            "max_context_tokens": max_context_tokens,
+            "status": "недоступен",
+            "detail": "invalid json from /models",
+        }
+
+    models = data.get("data") if isinstance(data, dict) else []
+    ids = [str(item.get("id", "")) for item in models if isinstance(item, dict)]
+    target = _normalize_model_name(vllm_model)
+    found = any(_normalize_model_name(mid) == target for mid in ids)
+    if found:
+        return {
+            "model": public_model,
+            "model_vllm": vllm_model,
+            "type": model_type,
+            "base_url": base_url,
+            "max_context_tokens": max_context_tokens,
+            "status": "доступен",
+            "detail": "",
+        }
+
+    preview = ", ".join(ids[:5])
+    return {
+        "model": public_model,
+        "model_vllm": vllm_model,
+        "type": model_type,
+        "base_url": base_url,
+        "max_context_tokens": max_context_tokens,
+        "status": "недоступен",
+        "detail": f"model id not found in /models; seen: {preview}",
+    }
 
 
 def _ollama_response(model: str, content: str, start_ns: int, load_ns: int = 0) -> Dict[str, Any]:
@@ -467,7 +690,7 @@ async def _read_request_body_as_dict(request: Request) -> Dict[str, Any]:
 
 
 async def _post_json(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    base_url = _next_base_url()
+    base_url = VLLM_BASE_URLS[0]
     url = f"{base_url}{path}"
     async with httpx.AsyncClient(timeout=600) as client:
         resp = await client.post(url, json=payload)
@@ -494,6 +717,39 @@ async def root_status() -> Dict[str, str]:
     }
 
 
+@app.get(
+    "/api/models",
+    tags=["models"],
+    summary="List Models and Availability",
+)
+async def api_models() -> Dict[str, List[ModelStatusItem]]:
+    checks = [
+        _probe_model_status(
+            "Qwen3.5-9B",
+            QWEN_CHAT_MODEL,
+            "chat",
+            QWEN_CHAT_BASE_URL,
+            QWEN_CHAT_MAX_CONTEXT_TOKENS,
+        ),
+        _probe_model_status(
+            "Qwen3.5-4B",
+            QWEN_EMBED_MODEL,
+            "embeddings",
+            QWEN_EMBED_BASE_URL,
+            QWEN_EMBED_MAX_CONTEXT_TOKENS,
+        ),
+        _probe_model_status(
+            "Ministral3-14B",
+            MINISTRAL_CHAT_MODEL,
+            "chat",
+            MINISTRAL_CHAT_BASE_URL,
+            MINISTRAL_CHAT_MAX_CONTEXT_TOKENS,
+        ),
+    ]
+    results = await asyncio.gather(*checks)
+    return {"models": results}
+
+
 @app.post(
     "/api/chat",
     tags=["chat"],
@@ -506,7 +762,9 @@ async def api_chat(request: Request) -> Dict[str, Any]:
     if CHAT_DEBUG_LOG:
         logger.info("chat.incoming body=%s", _safe_preview(body_data))
 
-    model = body_data.get("model") or VLLM_MODEL
+    requested_model = body_data.get("model")
+    target = _resolve_chat_target(requested_model)
+    model = requested_model or target["public_model"]
     messages: List[Dict[str, Any]] = body_data.get("messages", [])
     # Compatibility: some clients send prompt-like payload to /api/chat.
     if not messages:
@@ -537,19 +795,21 @@ async def api_chat(request: Request) -> Dict[str, Any]:
     estimated_input_tokens = _estimate_chat_input_tokens(messages)
     resolved_max_tokens = _resolve_max_tokens(body_data, estimated_input_tokens=estimated_input_tokens)
     payload = {
-        "model": VLLM_MODEL,
+        "model": target["vllm_model"],
         "messages": messages,
         "temperature": body_data.get("temperature", 0.7),
         "max_tokens": resolved_max_tokens,
     }
-    if DISABLE_THINKING:
+    if DISABLE_THINKING and "qwen" in _normalize_model_name(target["vllm_model"]):
         payload["chat_template_kwargs"] = {"enable_thinking": False}
 
     if CHAT_DEBUG_LOG:
         roles = [str(m.get("role", "")) for m in messages[:10]]
         logger.info(
-            "chat.adapted model=%s messages=%s roles=%s est_input_tokens=%s max_tokens=%s",
-            VLLM_MODEL,
+            "chat.adapted model=%s route_model=%s base_url=%s messages=%s roles=%s est_input_tokens=%s max_tokens=%s",
+            model,
+            target["vllm_model"],
+            target["base_url"],
             len(messages),
             roles,
             estimated_input_tokens,
@@ -557,7 +817,7 @@ async def api_chat(request: Request) -> Dict[str, Any]:
         )
 
     try:
-        data = await _post_json("/chat/completions", payload)
+        data = await _post_json_to(target["base_url"], "/chat/completions", payload)
     except HTTPException as exc:
         if CHAT_DEBUG_LOG:
             logger.error(
@@ -581,6 +841,124 @@ async def api_chat(request: Request) -> Dict[str, Any]:
     return _ollama_response(model, content, start_ns)
 
 
+def _sse_event(payload: Dict[str, Any]) -> str:
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+async def _stream_chat_ui_events(target: Dict[str, str], payload: Dict[str, Any], public_model: str):
+    url = f"{target['base_url'].rstrip('/')}/chat/completions"
+    total_text = ""
+
+    yield _sse_event({"type": "start", "model": public_model})
+
+    try:
+        async with httpx.AsyncClient(timeout=None) as client:
+            async with client.stream("POST", url, json=payload) as resp:
+                if resp.status_code >= 400:
+                    detail = await resp.aread()
+                    yield _sse_event(
+                        {
+                            "type": "error",
+                            "status": resp.status_code,
+                            "detail": detail.decode("utf-8", errors="ignore"),
+                        }
+                    )
+                    return
+
+                async for raw_line in resp.aiter_lines():
+                    line = (raw_line or "").strip()
+                    if not line or line.startswith(":"):
+                        continue
+                    if line.startswith("data:"):
+                        line = line[5:].strip()
+
+                    if line == "[DONE]":
+                        break
+
+                    try:
+                        chunk = json.loads(line)
+                    except Exception:
+                        continue
+
+                    choice = (chunk.get("choices") or [{}])[0]
+                    delta = choice.get("delta") or {}
+                    token = delta.get("content")
+                    if token is None:
+                        continue
+
+                    token_text = str(token)
+                    if not token_text:
+                        continue
+                    total_text += token_text
+                    yield _sse_event({"type": "token", "model": public_model, "token": token_text})
+
+        yield _sse_event({"type": "done", "model": public_model, "text": total_text})
+    except Exception as exc:
+        yield _sse_event({"type": "error", "status": 500, "detail": str(exc)})
+
+
+@app.post(
+    "/api/chat-ui",
+    tags=["chat"],
+    summary="Chat Completion Stream (UI)",
+)
+@app.post(
+    "/api/chat/ui",
+    tags=["chat"],
+    summary="Chat Completion Stream (UI Alias)",
+)
+async def api_chat_ui(request: Request) -> StreamingResponse:
+    body_data = await _read_request_body_as_dict(request)
+    requested_model = body_data.get("model")
+    target = _resolve_chat_target(requested_model)
+    model = requested_model or target["public_model"]
+
+    messages: List[Dict[str, Any]] = body_data.get("messages", [])
+    if not messages:
+        fallback_text = (
+            body_data.get("prompt")
+            or body_data.get("input")
+            or body_data.get("text")
+            or body_data.get("query")
+        )
+        if fallback_text is not None:
+            messages = [{"role": "user", "content": str(fallback_text)}]
+
+    if not messages:
+        messages = [{"role": "user", "content": CHAT_EMPTY_FALLBACK_USER_TEXT}]
+
+    messages = _inject_system_language_prompt(messages)
+    estimated_input_tokens = _estimate_chat_input_tokens(messages)
+    resolved_max_tokens = _resolve_max_tokens(body_data, estimated_input_tokens=estimated_input_tokens)
+
+    payload = {
+        "model": target["vllm_model"],
+        "messages": messages,
+        "temperature": body_data.get("temperature", 0.7),
+        "max_tokens": resolved_max_tokens,
+        "stream": True,
+    }
+    if DISABLE_THINKING and "qwen" in _normalize_model_name(target["vllm_model"]):
+        payload["chat_template_kwargs"] = {"enable_thinking": False}
+
+    if CHAT_DEBUG_LOG:
+        logger.info(
+            "chat.ui.adapted model=%s route_model=%s base_url=%s messages=%s est_input_tokens=%s max_tokens=%s",
+            model,
+            target["vllm_model"],
+            target["base_url"],
+            len(messages),
+            estimated_input_tokens,
+            resolved_max_tokens,
+        )
+
+    return StreamingResponse(
+        _stream_chat_ui_events(target, payload, model),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+    )
+
+
 @app.post(
     "/api/generate",
     tags=["generate"],
@@ -590,7 +968,9 @@ async def api_chat(request: Request) -> Dict[str, Any]:
 )
 async def api_generate(request: Request) -> Dict[str, Any]:
     body_data = await _read_request_body_as_dict(request)
-    model = body_data.get("model") or VLLM_MODEL
+    requested_model = body_data.get("model")
+    target = _resolve_chat_target(requested_model)
+    model = requested_model or target["public_model"]
     prompt: str = str(body_data.get("prompt", ""))
     prompt = f"{_language_instruction()}\n\n{prompt}".strip()
     stream = bool(body_data.get("stream", False))
@@ -601,12 +981,12 @@ async def api_generate(request: Request) -> Dict[str, Any]:
     start_ns = _ns()
     estimated_input_tokens = _estimate_input_tokens_from_text(prompt) + 16
     payload = {
-        "model": VLLM_MODEL,
+        "model": target["vllm_model"],
         "prompt": prompt,
         "temperature": body_data.get("temperature", 0.7),
         "max_tokens": _resolve_max_tokens(body_data, estimated_input_tokens=estimated_input_tokens),
     }
-    data = await _post_json("/completions", payload)
+    data = await _post_json_to(target["base_url"], "/completions", payload)
     content = _strip_reasoning_prefix(data["choices"][0]["text"])
     return _ollama_response(model, content, start_ns)
 
@@ -630,7 +1010,9 @@ async def api_embed(request: Request) -> Dict[str, Any]:
     if EMBED_DEBUG_LOG:
         logger.info("embed.incoming body=%s", _safe_preview(body_data))
 
-    model = VLLM_EMBED_MODEL if EMBED_FORCE_MODEL else (body_data.get("model") or VLLM_EMBED_MODEL)
+    requested_model = body_data.get("model")
+    target = _resolve_embed_target(requested_model)
+    model = requested_model or target["public_model"]
     input_data = body_data.get("input")
 
     # Compatibility: some clients send text in prompt-like fields.
@@ -654,20 +1036,22 @@ async def api_embed(request: Request) -> Dict[str, Any]:
 
     start_ns = _ns()
     payload = {
-        "model": model,
+        "model": target["vllm_model"],
         "input": input_data,
     }
 
     if EMBED_DEBUG_LOG:
         logger.info(
-            "embed.adapted model=%s input_type=%s input_preview=%s",
+            "embed.adapted model=%s route_model=%s base_url=%s input_type=%s input_preview=%s",
             model,
+            target["vllm_model"],
+            target["base_url"],
             type(input_data).__name__,
             _safe_preview(input_data),
         )
 
     try:
-        data = await _post_json_to(VLLM_EMBED_BASE_URL, "/embeddings", payload)
+        data = await _post_json_to(target["base_url"], "/embeddings", payload)
     except HTTPException as exc:
         if EMBED_DEBUG_LOG:
             logger.error(
