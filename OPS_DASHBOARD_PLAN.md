@@ -1,170 +1,277 @@
-# Core-Model Instruction Plan (Performance + Reliability)
+# K3s Migration Plan (Agent-Driven Runbook)
 
-## Context Update
-Previous infrastructure/dashboard plan is considered completed.
-This document replaces the old plan and defines the next optimization wave for the proxy and routing stack.
+## Purpose
+Migrate from Docker Compose operations to a manageable multi-server K3s platform in controlled phases without breaking current model-serving workloads.
 
-## Hard Constraints
-1. Preserve compatibility for existing client endpoints:
-- /api/chat
-- /api/generate
-- /api/embed
-- /api/embeddings
-- /api/models
+This file is the single source of truth for execution status and can be used directly by the agent.
 
-2. Keep all runtime behavior environment-driven.
+## Operating Model
+- Current Compose setup remains production fallback until final cutover.
+- Migration is phased, reversible, and validated at each gate.
+- No local Qwen3.5-4B restore on this server unless explicitly requested.
 
-3. Do not start or restore local Qwen3.5-4B on this server.
-- Local service vllm-embed-gpu1 is removed.
-- Remote models on other servers must remain untouched unless explicitly requested.
+## Status Legend
+- TODO: not started
+- IN_PROGRESS: currently executing
+- DONE: completed and validated
+- BLOCKED: blocked, waiting for user action
 
-## Priority Roadmap
+## Environment Inventory (fill once)
+- SERVER_MAIN_2x5090: artem-MS-7E48 (10.77.166.161)
+- SERVER_GPU_2x3090: dewiar-super-server (10.77.166.156)
+- SERVER_CPU_EPYC9654: AI-machine (10.77.163.177)
+- SERVER_K3S_CONTROL_PLANE: AI-machine (10.77.163.177)
+- ADMIN_USER_PER_SERVER: artem (main); TODO username for dewiar-super-server and AI-machine
+- PRIVATE_NETWORK_CIDR: 10.77.0.0/16 (verify)
+- K3S_VERSION_TARGET: v1.34.4+k3s1 (detected)
 
-### 1) Shared Upstream HTTP Client [DONE]
-Goal:
-Reduce latency and socket churn by reusing one AsyncClient per worker instead of creating clients per request.
+## Remote Execution Protocol
+Because the agent has no direct guaranteed access to external servers by default, execution is done as follows:
+1. Agent provides exact commands per server.
+2. User runs commands on target server via SSH.
+3. User sends command output back.
+4. Agent validates output and advances status.
 
-Implementation:
-- Add app-lifecycle managed shared client in upstream services.
-- Reuse the same client in request forwarding and model status checks.
+Optional mode:
+- If your local workstation already has SSH key-based access to those servers, the agent can issue ssh commands from your local terminal session.
+- This still uses your machine identity and keys; the agent does not hold independent server credentials.
 
-Acceptance criteria:
-- No behavior change in API responses.
-- Lower connection overhead under parallel load.
+## Phase 0 - Preconditions and Freeze
+Status: IN_PROGRESS
 
-Status:
-- Completed on 2026-03-12.
-- Shared AsyncClient lifecycle added and reused by upstream forwarding + model status probes.
+Tasks:
+- [ ] Confirm Compose stack is stable and documented rollback works.
+- [ ] Snapshot current env files and compose manifests.
+- [ ] Confirm model routing map and public aliases are current.
+- [ ] Define maintenance windows and rollback owner.
 
-### 2) Deduplicate Model Probes in /api/models [DONE]
-Goal:
-Prevent duplicate entries and redundant health checks when aliases point to the same model+base_url.
+Validation:
+- [ ] /api/models healthy in current Compose.
+- [ ] /api/chat and /api/embeddings smoke pass.
 
-Implementation:
-- Deduplicate route checks by key: model_vllm + base_url + type.
-- Keep strict alias resolution, but probe each unique target once.
+Execution notes:
+- 2026-03-12: Phase 0 started.
+- Waiting for server inventory outputs (hostname, OS, CPU/GPU, docker, network reachability).
+- 2026-03-12: Inventory received for dewiar-super-server and AI-machine.
+- 2026-03-12: Need one follow-up value from dewiar-super-server: free -h memory line output.
 
-Acceptance criteria:
-- /api/models contains no duplicate rows for identical upstream target.
-- Poller performs fewer redundant requests.
+## Phase 1 - K3s Control Plane Bootstrap (No Production Traffic)
+Status: DONE
 
-Status:
-- Completed on 2026-03-12.
-- Probes deduplicated by normalized model_vllm + base_url + type.
-- Availability cache still resolves by aliases.
+Target:
+- K3s server on main node (2x5090), no model traffic cutover yet.
 
-### 3) Configurable Connection Pooling Limits [DONE]
-Goal:
-Improve throughput and stability under concurrent traffic.
+Tasks:
+- [ ] Install K3s server on main node.
+- [ ] Secure kubeconfig and restrict access.
+- [ ] Install kubectl + basic RBAC baseline.
+- [ ] Enable metrics-server.
 
-Implementation:
-- Add env vars for pool tuning:
-  - UPSTREAM_MAX_CONNECTIONS
-  - UPSTREAM_MAX_KEEPALIVE_CONNECTIONS
-  - UPSTREAM_KEEPALIVE_EXPIRY_SECONDS
-- Wire these values into shared HTTP client creation.
+Suggested commands (run on SERVER_MAIN_2x5090):
+```bash
+curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="${K3S_VERSION_TARGET}" sh -s - server --write-kubeconfig-mode 644
+sudo kubectl get nodes -o wide
+sudo kubectl get pods -A
+```
 
-Acceptance criteria:
-- Defaults are safe and backward compatible.
-- Values are exposed in .env and docker-compose passthrough.
+Validation:
+- [x] Node Ready (control-plane node AI-machine).
+- [x] System pods healthy (kube-system + installed platform pods running).
 
-Status:
-- Completed on 2026-03-12.
-- Added UPSTREAM_MAX_CONNECTIONS, UPSTREAM_MAX_KEEPALIVE_CONNECTIONS, UPSTREAM_KEEPALIVE_EXPIRY_SECONDS.
-- Wired into shared AsyncClient limits in upstream service.
+Execution notes:
+- 2026-03-12: k3s binary already present on main server.
+- Detected version: v1.34.4+k3s1.
+- 2026-03-12: Control-plane confirmed on AI-machine (10.77.163.177).
+- 2026-03-12: Existing platform components detected: ArgoCD, Argo Workflows, GPU Operator, Traefik, metrics-server.
 
-### 4) Centralized Bounded Retries (5xx/Transient Only) [DONE]
-Goal:
-Increase resilience without causing retry storms.
+## Phase 2 - Add Workers and Networking Baseline
+Status: DONE
 
-Implementation:
-- Retry only for transient upstream conditions:
-  - HTTP 5xx
-  - connection reset / timeouts
-- Add bounded retries with small jitter and cap.
-- Keep non-retryable 4xx behavior unchanged.
+Tasks:
+- [ ] Join 2x3090 as worker.
+- [ ] Join EPYC9654 as worker.
+- [ ] Add deterministic node labels.
+- [ ] Define taints for GPU scheduling policy.
 
-Acceptance criteria:
-- No infinite retries.
-- Better success rate for intermittent failures.
+Suggested labels/taints:
+- node-role=main|gpu|cpu
+- gpu=true on GPU nodes
+- taint examples for dedicated workloads
 
-Status:
-- Completed on 2026-03-12.
-- Retry policy centralized in upstream service.
-- Retries apply only to transient request errors and HTTP 5xx.
+Validation:
+- [x] All nodes Ready.
+- [x] Labels and taints visible.
 
-### 5) Basic Prometheus Metrics [DONE]
-Goal:
-Make performance and error trends observable.
+Execution notes:
+- 2026-03-12: Worker artem-ms-7e48 is already joined but currently NotReady.
+- 2026-03-12: dewiar-super-server worker not joined yet.
+- 2026-03-12: artem-ms-7e48 agent repeatedly fails CA fetch via local LB (127.0.0.1:6444), control-plane endpoint https://10.77.163.177:6443.
+- 2026-03-12: Node shows taints node.kubernetes.io/unreachable and stale heartbeat.
+- Next: verify control-plane reachability from artem-ms-7e48, then force clean rejoin of k3s-agent.
+- 2026-03-12: VPN split/bypass rules updated on artem-ms-7e48 to exclude K3s control-plane/corporate IPs.
+- 2026-03-12: Connectivity to 10.77.163.177:6443 restored; k3s-agent restarted.
+- 2026-03-12: artem-ms-7e48 status recovered to Ready.
+- 2026-03-12: dewiar-super-server joined and Ready.
+- 2026-03-12: Final node labels confirmed.
+- Result: ai-machine role=control-plane gpu=false ready=True; artem-ms-7e48 role=gpu gpu=true ready=True; dewiar-super-server role=gpu gpu=true ready=True.
 
-Implementation:
-- Expose metrics endpoint and counters/histograms for:
-  - endpoint latency
-  - upstream latency by route
-  - upstream errors by status code
-  - model availability state
+## Phase 3 - Platform Services (Observability + Ingress + Secrets)
+Status: DONE
 
-Acceptance criteria:
-- Metrics endpoint available and scrapeable.
-- Key dashboards can be built without code changes.
+Tasks:
+- [x] Install ingress (Traefik default or NGINX).
+- [x] Install cert-manager.
+- [x] Install Prometheus + Grafana.
+- [x] Install Loki + Promtail.
+- [x] Configure central dashboards and alerts.
 
-Status:
-- Completed on 2026-03-12.
-- Added /metrics endpoint and core request/upstream/model gauges.
+Validation:
+- [x] Metrics scrape works.
+- [x] Logs visible per namespace/pod.
+- [x] TLS issuance tested on one endpoint.
 
-### 6) Adaptive Status Polling [DONE]
-Goal:
-Reduce unnecessary status traffic while reacting quickly to outages.
+Execution notes:
+- 2026-03-12: Phase 3 started.
+- Existing components already observed in cluster: Traefik, metrics-server, ArgoCD, Argo Workflows, GPU Operator.
+- Next: verify cert-manager, Prometheus/Grafana, and Loki/Promtail status; install missing pieces only.
+- 2026-03-12: Audit results confirmed:
+- Ingress present: Traefik LoadBalancer on 10.77.163.177,10.77.166.156,10.77.166.161.
+- Missing components: cert-manager, Prometheus, Grafana, Loki, Promtail (not found in CRD/deploy).
+- Operational issue found: argocd-repo-server pod is 0/1 Unknown.
+- 2026-03-12: argocd-repo-server recovered after pod recreation (1/1 Running).
+- 2026-03-12: cert-manager install attempt failed due to Helm using localhost:8080 (missing KUBECONFIG context); retry with explicit k3s kubeconfig.
+- 2026-03-12: cert-manager installed successfully; all controller/webhook pods Running and CRDs present.
+- 2026-03-12: kube-prometheus-stack installed successfully in namespace monitoring.
+- 2026-03-12: Prometheus/Grafana/Alertmanager running; monitoring CRDs present.
+- 2026-03-12: issue detected: kube-prom-stack-prometheus-node-exporter CrashLoopBackOff on dewiar-super-server.
+- 2026-03-12: node-exporter conflict resolved on dewiar-super-server (host port 9100 conflict removed).
+- 2026-03-12: all node-exporter pods Running across all nodes.
+- 2026-03-12: helm release kube-prom-stack status is deployed.
+- 2026-03-12: Loki deployed in logging namespace (single binary mode), status deployed.
+- 2026-03-12: Promtail deployed as DaemonSet on all nodes, status deployed.
+- 2026-03-12: logging services loki/loki-gateway available in cluster.
+- 2026-03-12: Grafana Loki datasource added successfully (Alertmanager/Loki/Prometheus datasources visible).
+- 2026-03-12: Prometheus rules API responds with status=success.
+- Pending: apply and verify custom PrometheusRule object platform-basic-alerts.
+- 2026-03-12: PrometheusRule platform-basic-alerts present and validated by prometheus-operator.
+- 2026-03-12: TLS issuance test started in monitoring namespace; Certificate created and CertificateRequest emitted.
+- 2026-03-12: Current state is expected transitional Issuing/DoesNotExist before final Secret appears.
+- 2026-03-12: ClusterIssuer selfsigned-local created and Ready=True.
+- 2026-03-12: Test certificate phase3-tls-test issued successfully (Ready=True), TLS secret phase3-tls-test-secret present.
 
-Implementation:
-- Use longer poll interval on stable state.
-- Temporarily shorten interval after errors.
+## Phase 4 - GitOps and Deployment Hygiene
+Status: IN_PROGRESS
 
-Acceptance criteria:
-- Lower background probe load in stable periods.
-- Faster detection during incidents.
+Tasks:
+- [ ] Install ArgoCD or Flux.
+- [ ] Create repo structure for manifests/helm values.
+- [ ] Add environments: dev/stage/prod overlays.
+- [ ] Enforce image tag pinning and rollout strategy.
 
-Status:
-- Completed on 2026-03-12.
-- Poller now uses short interval on refresh errors or unavailable models.
+Validation:
+- [ ] One non-critical app reconciles successfully.
+- [ ] Rollback tested via Git revision.
 
-### 7) Lightweight Perf Smoke Script [DONE]
-Goal:
-Track regression risk with quick repeatable checks.
+Execution notes:
+- 2026-03-12: Initial GitOps scaffold created in repository under k8s/base, k8s/overlays/{dev,stage,prod}, and k8s/argocd.
+- Pending: commit/push scaffold and create ArgoCD Application core-model-dev for first reconciliation test.
 
-Implementation:
-- Add simple script with profiles:
-  - warm single request
-  - short burst concurrency
-  - mixed chat/embed calls
-- Print latency summary and error counts.
+## Phase 5 - Migrate Proxy Layer First
+Status: TODO
 
-Acceptance criteria:
-- Script runs from repo root with one command.
-- Produces comparable before/after numbers.
+Tasks:
+- [ ] Deploy ollama-proxy in K3s namespace core-model.
+- [ ] Port env settings from Compose to ConfigMap/Secret.
+- [ ] Add readiness/liveness probes.
+- [ ] Expose service via ingress/internal LB.
 
-Status:
-- Completed on 2026-03-12.
-- Added scripts/perf_smoke.py with warm, burst, and mixed profiles.
+Validation:
+- [ ] /api/models responds from K3s proxy.
+- [ ] /metrics available and scraped.
+- [ ] Latency not worse than Compose baseline by more than agreed threshold.
 
-## Recommended Execution Order
-1. Shared HTTP client.
-2. Probe deduplication.
-3. Pooling env settings.
-4. Retry policy centralization.
-5. Adaptive polling.
-6. Metrics.
-7. Perf smoke script.
+## Phase 6 - GPU Runtime Enablement
+Status: TODO
 
-## Validation Checklist Per Step
-1. python3 -m py_compile proxy/app.py
-2. python3 -m py_compile proxy/services/*.py
-3. sudo docker compose up -d --build ollama-proxy
-4. curl -sS http://127.0.0.1:11434/api/models
-5. Smoke test one chat route and one embedding route.
+Tasks:
+- [ ] Install NVIDIA container toolkit on GPU nodes.
+- [ ] Install NVIDIA device plugin (or GPU operator).
+- [ ] Verify GPU allocatable resources in k8s.
 
-## Definition of Done
-1. Compatibility preserved for all public endpoints.
-2. No local Qwen3.5-4B usage on this server.
-3. Lower average upstream overhead in smoke tests.
-4. Better observability and cleaner operational triage.
+Validation:
+- [ ] Test pod can see GPU.
+- [ ] Scheduling to intended GPU node works.
+
+## Phase 7 - Migrate Model Workloads Incrementally
+Status: TODO
+
+Order:
+1. Non-critical model route.
+2. One primary embedding route.
+3. One primary chat route.
+4. Remaining workloads.
+
+Tasks:
+- [ ] Deploy first model workload as StatefulSet/Deployment.
+- [ ] Apply resource requests/limits and node selectors.
+- [ ] Add PodDisruptionBudget and anti-affinity where useful.
+- [ ] Benchmark against Compose baseline.
+
+Validation:
+- [ ] Model parity checks pass.
+- [ ] No regression in error rate/timeout profile.
+
+## Phase 8 - Controlled Cutover
+Status: TODO
+
+Tasks:
+- [ ] Route partial traffic to K3s proxy (canary).
+- [ ] Observe metrics/logs for agreed window.
+- [ ] Increase traffic gradually to 100%.
+- [ ] Keep Compose hot-standby until stability window closes.
+
+Validation:
+- [ ] Stable SLO in full traffic window.
+- [ ] On-call rollback runbook tested.
+
+## Phase 9 - Decommission Legacy Compose Paths
+Status: TODO
+
+Tasks:
+- [ ] Disable legacy services not required.
+- [ ] Archive compose configs and rollback notes.
+- [ ] Keep minimal emergency fallback scripts.
+
+Validation:
+- [ ] No production dependency on old Compose path.
+
+## Rollback Rules (Always Active)
+- Any failed gate returns to previous stable phase.
+- Do not continue forward with unresolved BLOCKED items.
+- Keep last known-good Compose deployment ready until Phase 9 DONE.
+
+## Agent Execution Queue
+1. Phase 0 freeze checklist
+2. Phase 1 bootstrap
+3. Phase 2 workers + labels/taints
+4. Phase 3 observability
+5. Phase 5 proxy migration (before heavy model migration)
+6. Phase 6 GPU enablement
+7. Phase 7 model workloads
+8. Phase 8 cutover
+9. Phase 9 decommission
+
+## Session Log Template
+- Date:
+- Phase:
+- Commands run:
+- Output summary:
+- Decision:
+- Next step:
+- Status update:
+
+
+
+
+
+K10afe5c5d9cc43f8aeccf022f88893b0a3fdeda809322055f602383b54410255e6::server:5c50c44324909fad527c8daa4b702229
