@@ -1,35 +1,35 @@
 services:
   vllm-gpu0:
-    image: vllm/vllm-openai:cu130-nightly
+    image: ${VLLM_IMAGE:-vllm/vllm-openai:latest}
     command:
-      - Qwen/Qwen3.5-9B
+      - ${VLLM_CHAT_MODEL_TAG:-Qwen/Qwen3.5-9B}
       - --host
       - 0.0.0.0
       - --port
       - "8000"
       - --tensor-parallel-size
-      - "2"
+      - "${VLLM_CHAT_TP_SIZE:-2}"
       - --dtype
-      - half
+      - ${VLLM_CHAT_DTYPE:-bfloat16}
       - --max-model-len
-      - "10240"
+      - "${VLLM_CHAT_MAX_MODEL_LEN:-32768}"
       - --gpu-memory-utilization
-      - "0.55"
+      - "${VLLM_CHAT_GPU_MEM_UTIL:-0.90}"
       - --kv-cache-dtype
-      - fp8
+      - ${VLLM_CHAT_KV_CACHE_DTYPE:-fp8}
       - --disable-custom-all-reduce
       - --swap-space
-      - "8"
+      - "${VLLM_CHAT_SWAP_SPACE:-8}"
       - --max-num-seqs
-      - "4"
+      - "${VLLM_CHAT_MAX_NUM_SEQS:-8}"
       - --max-num-batched-tokens
-      - "2048"
+      - "${VLLM_CHAT_MAX_BATCHED_TOKENS:-2048}"
       - --enable-chunked-prefill
     environment:
       - HF_TOKEN=${HF_TOKEN}
-      - HF_HUB_ENABLE_HF_TRANSFER=1
-      - NVIDIA_VISIBLE_DEVICES=0,1
-      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - HF_HUB_ENABLE_HF_TRANSFER=${HF_HUB_ENABLE_HF_TRANSFER:-1}
+      - NVIDIA_VISIBLE_DEVICES=${VLLM_CHAT_VISIBLE_DEVICES:-0,1}
+      - NVIDIA_DRIVER_CAPABILITIES=${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}
     volumes:
       - hf-cache:/root/.cache/huggingface
     ipc: host
@@ -37,65 +37,54 @@ services:
     ports:
       - "8001:8000"
 
-  vllm-embed-gpu1:
-    image: vllm/vllm-openai:cu130-nightly
-    command:
-      - ${VLLM_EMBED_MODEL:-Qwen/Qwen3.5-4B}
-      - --host
-      - 0.0.0.0
-      - --port
-      - "8000"
-      - --tensor-parallel-size
-      - "2"
-      - --runner
-      - pooling
-      - --dtype
-      - half
-      - --max-model-len
-      - "8192"
-      - --gpu-memory-utilization
-      - "0.55"
-      - --max-num-seqs
-      - "4"
-      - --max-num-batched-tokens
-      - "2048"
-    environment:
-      - HF_TOKEN=${HF_TOKEN}
-      - HF_HUB_ENABLE_HF_TRANSFER=1
-      - NVIDIA_VISIBLE_DEVICES=0,1
-      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
-    volumes:
-      - hf-cache:/root/.cache/huggingface
-    ipc: host
-    gpus: "all"
-    ports:
-      - "8002:8000"
-
   ollama-proxy:
     build:
       context: ./proxy
     environment:
-      - VLLM_BASE_URLS=http://vllm-gpu0:8000/v1
-      - VLLM_MODEL=Qwen/Qwen3.5-9B
-      - VLLM_CHAT_BASE_URL=http://vllm-gpu0:8000/v1
-      - QWEN_CHAT_MODEL=Qwen/Qwen3.5-9B
-      - QWEN_CHAT_BASE_URL=http://vllm-gpu0:8000/v1
-      - MINISTRAL_CHAT_MODEL=Ministral-3-14B
-      - MINISTRAL_CHAT_BASE_URL=http://10.77.166.156:8000/v1
-      - VLLM_EMBED_BASE_URL=http://vllm-embed-gpu1:8000/v1
-      - VLLM_EMBED_MODEL=${VLLM_EMBED_MODEL:-Qwen/Qwen3.5-4B}
-      - QWEN_EMBED_MODEL=${VLLM_EMBED_MODEL:-Qwen/Qwen3.5-4B}
-      - QWEN_EMBED_BASE_URL=http://vllm-embed-gpu1:8000/v1
-      - DEFAULT_RESPONSE_LANGUAGE=ru
-      - DISABLE_THINKING=1
-      - VLLM_DEFAULT_MAX_TOKENS=512
-      - VLLM_MAX_TOKENS_CAP=1024
-      - VLLM_MAX_CONTEXT_TOKENS=10240
-      - VLLM_MIN_CONTEXT_HEADROOM=256
-      - PROXY_PORT=11434
+      - VLLM_BASE_URLS=${VLLM_BASE_URLS:-http://vllm-gpu0:8000/v1}
+      - VLLM_MODEL=${VLLM_MODEL:-Qwen/Qwen3.5-9B}
+      - VLLM_CHAT_BASE_URL=${VLLM_CHAT_BASE_URL:-http://vllm-gpu0:8000/v1}
+      - QWEN_CHAT_MODEL=${QWEN_CHAT_MODEL:-Qwen/Qwen3.5-9B}
+      - QWEN_CHAT_BASE_URL=${QWEN_CHAT_BASE_URL:-http://vllm-gpu0:8000/v1}
+      - MINISTRAL_CHAT_MODEL=${MINISTRAL_CHAT_MODEL:-Ministral-3-14B}
+      - MINISTRAL_CHAT_BASE_URL=${MINISTRAL_CHAT_BASE_URL:-http://10.77.166.156:8000/v1}
+      - VLLM_EMBED_BASE_URL=${VLLM_EMBED_BASE_URL:-http://10.77.166.156:8001/v1}
+      - VLLM_EMBED_MODEL=${VLLM_EMBED_MODEL:-Qwen3-Embedding-8B}
+      - QWEN_EMBED_MODEL=${QWEN_EMBED_MODEL:-Qwen3-Embedding-8B}
+      - QWEN_EMBED_BASE_URL=${QWEN_EMBED_BASE_URL:-http://10.77.166.156:8001/v1}
+      - QWEN_EMBED_8B_MODEL=${QWEN_EMBED_8B_MODEL:-}
+      - QWEN_EMBED_8B_BASE_URL=${QWEN_EMBED_8B_BASE_URL:-}
+      - QWEN_EMBED_4B_MODEL=${QWEN_EMBED_4B_MODEL:-}
+      - QWEN_EMBED_4B_BASE_URL=${QWEN_EMBED_4B_BASE_URL:-}
+      - DEFAULT_RESPONSE_LANGUAGE=${DEFAULT_RESPONSE_LANGUAGE:-ru}
+      - DISABLE_THINKING=${DISABLE_THINKING:-1}
+      - VLLM_DEFAULT_MAX_TOKENS=${VLLM_DEFAULT_MAX_TOKENS:-512}
+      - VLLM_MAX_TOKENS_CAP=${VLLM_MAX_TOKENS_CAP:-1024}
+      - VLLM_MAX_CONTEXT_TOKENS=${VLLM_MAX_CONTEXT_TOKENS:-32768}
+      - VLLM_MIN_CONTEXT_HEADROOM=${VLLM_MIN_CONTEXT_HEADROOM:-256}
+      - PROXY_PORT=${PROXY_PORT:-11434}
+      - UPSTREAM_TIMEOUT_SECONDS=${UPSTREAM_TIMEOUT_SECONDS:-10}
+      - MODEL_STATUS_POLL_INTERVAL_SECONDS=${MODEL_STATUS_POLL_INTERVAL_SECONDS:-60}
+      - PUBLIC_QWEN_CHAT_MODEL=${PUBLIC_QWEN_CHAT_MODEL:-Qwen3.5-9B}
+      - PUBLIC_QWEN_EMBED_MODEL=${PUBLIC_QWEN_EMBED_MODEL:-Qwen3-Embedding-8B}
+      - PUBLIC_QWEN_EMBED_8B_MODEL=${PUBLIC_QWEN_EMBED_8B_MODEL:-Qwen3-Embedding-8B}
+      - PUBLIC_QWEN_EMBED_4B_MODEL=${PUBLIC_QWEN_EMBED_4B_MODEL:-Qwen3-Embedding-4B}
+      - PUBLIC_MINISTRAL_CHAT_MODEL=${PUBLIC_MINISTRAL_CHAT_MODEL:-Ministral3-14B}
+      - QWEN_CHAT_MAX_CONTEXT_TOKENS=${QWEN_CHAT_MAX_CONTEXT_TOKENS:-10240}
+      - QWEN_EMBED_MAX_CONTEXT_TOKENS=${QWEN_EMBED_MAX_CONTEXT_TOKENS:-8192}
+      - QWEN_EMBED_8B_MAX_CONTEXT_TOKENS=${QWEN_EMBED_8B_MAX_CONTEXT_TOKENS:-8192}
+      - QWEN_EMBED_4B_MAX_CONTEXT_TOKENS=${QWEN_EMBED_4B_MAX_CONTEXT_TOKENS:-4096}
+      - MINISTRAL_CHAT_MAX_CONTEXT_TOKENS=${MINISTRAL_CHAT_MAX_CONTEXT_TOKENS:-8192}
+      - CPU_CHAT_Q4_MODEL=${CPU_CHAT_Q4_MODEL:-}
+      - CPU_CHAT_Q4_BASE_URL=${CPU_CHAT_Q4_BASE_URL:-}
+      - PUBLIC_CPU_CHAT_Q4_MODEL=${PUBLIC_CPU_CHAT_Q4_MODEL:-}
+      - CPU_CHAT_Q4_MAX_CONTEXT_TOKENS=${CPU_CHAT_Q4_MAX_CONTEXT_TOKENS:-8192}
+      - CPU_CHAT_Q6_MODEL=${CPU_CHAT_Q6_MODEL:-}
+      - CPU_CHAT_Q6_BASE_URL=${CPU_CHAT_Q6_BASE_URL:-}
+      - PUBLIC_CPU_CHAT_Q6_MODEL=${PUBLIC_CPU_CHAT_Q6_MODEL:-}
+      - CPU_CHAT_Q6_MAX_CONTEXT_TOKENS=${CPU_CHAT_Q6_MAX_CONTEXT_TOKENS:-8192}
     depends_on:
       - vllm-gpu0
-      - vllm-embed-gpu1
     ports:
       - "11434:11434"
 

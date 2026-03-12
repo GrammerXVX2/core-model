@@ -1,0 +1,82 @@
+import os
+
+import httpx
+
+VLLM_BASE_URLS = [
+    url.strip().rstrip("/")
+    for url in os.getenv("VLLM_BASE_URLS", os.getenv("VLLM_BASE_URL", "http://localhost:8000/v1")).split(",")
+    if url.strip()
+]
+VLLM_MODEL = os.getenv("VLLM_MODEL", "Qwen/Qwen3.5-9B")
+VLLM_EMBED_BASE_URL = os.getenv("VLLM_EMBED_BASE_URL", VLLM_BASE_URLS[0])
+VLLM_EMBED_MODEL = os.getenv("VLLM_EMBED_MODEL", "Qwen3-Embedding-8B")
+
+# Model routing config.
+DEFAULT_CHAT_BASE_URL = os.getenv("VLLM_CHAT_BASE_URL", VLLM_BASE_URLS[0])
+QWEN_CHAT_MODEL = os.getenv("QWEN_CHAT_MODEL", "Qwen/Qwen3.5-9B")
+QWEN_CHAT_BASE_URL = os.getenv("QWEN_CHAT_BASE_URL", DEFAULT_CHAT_BASE_URL)
+MINISTRAL_CHAT_MODEL = os.getenv("MINISTRAL_CHAT_MODEL", "Ministral-3-14B")
+MINISTRAL_CHAT_BASE_URL = os.getenv("MINISTRAL_CHAT_BASE_URL", DEFAULT_CHAT_BASE_URL)
+QWEN_EMBED_MODEL = os.getenv("QWEN_EMBED_MODEL", VLLM_EMBED_MODEL)
+QWEN_EMBED_BASE_URL = os.getenv("QWEN_EMBED_BASE_URL", VLLM_EMBED_BASE_URL)
+QWEN_EMBED_8B_MODEL = os.getenv("QWEN_EMBED_8B_MODEL", "")
+QWEN_EMBED_8B_BASE_URL = os.getenv("QWEN_EMBED_8B_BASE_URL", "")
+QWEN_EMBED_4B_MODEL = os.getenv("QWEN_EMBED_4B_MODEL", "")
+QWEN_EMBED_4B_BASE_URL = os.getenv("QWEN_EMBED_4B_BASE_URL", "")
+PUBLIC_QWEN_CHAT_MODEL = os.getenv("PUBLIC_QWEN_CHAT_MODEL", "Qwen3.5-9B")
+PUBLIC_QWEN_EMBED_MODEL = os.getenv("PUBLIC_QWEN_EMBED_MODEL", "Qwen3-Embedding-8B")
+PUBLIC_QWEN_EMBED_8B_MODEL = os.getenv("PUBLIC_QWEN_EMBED_8B_MODEL", "Qwen3-Embedding-8B")
+PUBLIC_QWEN_EMBED_4B_MODEL = os.getenv("PUBLIC_QWEN_EMBED_4B_MODEL", "Qwen3-Embedding-4B")
+PUBLIC_MINISTRAL_CHAT_MODEL = os.getenv("PUBLIC_MINISTRAL_CHAT_MODEL", "Ministral3-14B")
+QWEN_CHAT_MAX_CONTEXT_TOKENS = int(os.getenv("QWEN_CHAT_MAX_CONTEXT_TOKENS", os.getenv("VLLM_MAX_CONTEXT_TOKENS", "10240")))
+MINISTRAL_CHAT_MAX_CONTEXT_TOKENS = int(os.getenv("MINISTRAL_CHAT_MAX_CONTEXT_TOKENS", "8192"))
+QWEN_EMBED_MAX_CONTEXT_TOKENS = int(os.getenv("QWEN_EMBED_MAX_CONTEXT_TOKENS", "8192"))
+QWEN_EMBED_8B_MAX_CONTEXT_TOKENS = int(os.getenv("QWEN_EMBED_8B_MAX_CONTEXT_TOKENS", "8192"))
+QWEN_EMBED_4B_MAX_CONTEXT_TOKENS = int(os.getenv("QWEN_EMBED_4B_MAX_CONTEXT_TOKENS", "4096"))
+
+# Optional additional chat routes (e.g. CPU-hosted GGUF variants).
+CPU_CHAT_Q4_MODEL = os.getenv("CPU_CHAT_Q4_MODEL", "")
+CPU_CHAT_Q4_BASE_URL = os.getenv("CPU_CHAT_Q4_BASE_URL", "")
+PUBLIC_CPU_CHAT_Q4_MODEL = os.getenv("PUBLIC_CPU_CHAT_Q4_MODEL", "")
+CPU_CHAT_Q4_MAX_CONTEXT_TOKENS = int(os.getenv("CPU_CHAT_Q4_MAX_CONTEXT_TOKENS", "8192"))
+
+CPU_CHAT_Q6_MODEL = os.getenv("CPU_CHAT_Q6_MODEL", "")
+CPU_CHAT_Q6_BASE_URL = os.getenv("CPU_CHAT_Q6_BASE_URL", "")
+PUBLIC_CPU_CHAT_Q6_MODEL = os.getenv("PUBLIC_CPU_CHAT_Q6_MODEL", "")
+CPU_CHAT_Q6_MAX_CONTEXT_TOKENS = int(os.getenv("CPU_CHAT_Q6_MAX_CONTEXT_TOKENS", "8192"))
+
+DEFAULT_RESPONSE_LANGUAGE = os.getenv("DEFAULT_RESPONSE_LANGUAGE", "ru")
+DISABLE_THINKING = os.getenv("DISABLE_THINKING", "1") == "1"
+DEFAULT_MAX_TOKENS = int(os.getenv("VLLM_DEFAULT_MAX_TOKENS", "256"))
+MAX_TOKENS_CAP = int(os.getenv("VLLM_MAX_TOKENS_CAP", "1024"))
+MAX_CONTEXT_TOKENS = int(os.getenv("VLLM_MAX_CONTEXT_TOKENS", "4096"))
+MIN_CONTEXT_HEADROOM = int(os.getenv("VLLM_MIN_CONTEXT_HEADROOM", "256"))
+CHAT_DEBUG_LOG = os.getenv("CHAT_DEBUG_LOG", "1") == "1"
+EMBED_DEBUG_LOG = os.getenv("EMBED_DEBUG_LOG", "1") == "1"
+LOG_TEXT_PREVIEW_CHARS = int(os.getenv("LOG_TEXT_PREVIEW_CHARS", "500"))
+REQUEST_DEBUG_LOG = os.getenv("REQUEST_DEBUG_LOG", "1") == "1"
+CHAT_EMPTY_FALLBACK_USER_TEXT = os.getenv("CHAT_EMPTY_FALLBACK_USER_TEXT", "")
+LANGUAGE_INSTRUCTION_RU = os.getenv(
+    "LANGUAGE_INSTRUCTION_RU",
+    "Отвечай только на русском языке.",
+)
+LANGUAGE_INSTRUCTION_RU_FINAL_ONLY = os.getenv(
+    "LANGUAGE_INSTRUCTION_RU_FINAL_ONLY",
+    "Не показывай ход рассуждений, верни только финальный ответ.",
+)
+LANGUAGE_INSTRUCTION_DEFAULT = os.getenv(
+    "LANGUAGE_INSTRUCTION_DEFAULT",
+    "Answer in the configured default language. Provide only the final answer.",
+)
+REASONING_PREFIX_MARKERS = [
+    m.strip()
+    for m in os.getenv(
+        "REASONING_PREFIX_MARKERS",
+        "Thinking Process:|Reasoning:|Ход рассуждений:",
+    ).split("|")
+    if m.strip()
+]
+
+UPSTREAM_TIMEOUT_SECONDS = float(os.getenv("UPSTREAM_TIMEOUT_SECONDS", "10"))
+MODEL_STATUS_POLL_INTERVAL_SECONDS = int(os.getenv("MODEL_STATUS_POLL_INTERVAL_SECONDS", "60"))
+UPSTREAM_HTTP_TIMEOUT = httpx.Timeout(timeout=UPSTREAM_TIMEOUT_SECONDS)
