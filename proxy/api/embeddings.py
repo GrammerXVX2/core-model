@@ -1,4 +1,3 @@
-import asyncio
 import json
 import logging
 import os
@@ -99,26 +98,13 @@ async def api_embed(request: Request) -> Dict[str, Any]:
     try:
         data = await _post_json_to(target["base_url"], "/embeddings", payload)
     except HTTPException as exc:
-        if exc.status_code >= 500:
-            await asyncio.sleep(0.2)
-            try:
-                data = await _post_json_to(target["base_url"], "/embeddings", payload)
-            except HTTPException:
-                if EMBED_DEBUG_LOG:
-                    logger.error(
-                        "embed.vllm_error status=%s detail=%s",
-                        exc.status_code,
-                        safe_preview(exc.detail),
-                    )
-                raise
-        else:
-            if EMBED_DEBUG_LOG:
-                logger.error(
-                    "embed.vllm_error status=%s detail=%s",
-                    exc.status_code,
-                    safe_preview(exc.detail),
-                )
-            raise
+        if EMBED_DEBUG_LOG:
+            logger.error(
+                "embed.vllm_error status=%s detail=%s",
+                exc.status_code,
+                safe_preview(exc.detail),
+            )
+        raise
 
     embeddings = [item.get("embedding", []) for item in data.get("data", [])]
     usage = data.get("usage") or {}
