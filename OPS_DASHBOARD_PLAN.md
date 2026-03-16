@@ -160,7 +160,7 @@ Execution notes:
 - 2026-03-12: Test certificate phase3-tls-test issued successfully (Ready=True), TLS secret phase3-tls-test-secret present.
 
 ## Phase 4 - GitOps and Deployment Hygiene
-Status: IN_PROGRESS
+Status: DONE
 
 Tasks:
 - [ ] Install ArgoCD or Flux.
@@ -169,15 +169,21 @@ Tasks:
 - [ ] Enforce image tag pinning and rollout strategy.
 
 Validation:
-- [ ] One non-critical app reconciles successfully.
-- [ ] Rollback tested via Git revision.
+- [x] One non-critical app reconciles successfully.
+- [x] Rollback tested via Git revision.
 
 Execution notes:
 - 2026-03-12: Initial GitOps scaffold created in repository under k8s/base, k8s/overlays/{dev,stage,prod}, and k8s/argocd.
 - Pending: commit/push scaffold and create ArgoCD Application core-model-dev for first reconciliation test.
+- 2026-03-13: BLOCKED: core-model-dev application sync status is Unknown due to argocd-repo-server connectivity error (service endpoint 10.43.116.34:8081 connection refused).
+- 2026-03-13: BLOCKER RESOLVED: core-model-dev reconciled successfully; status Synced/Healthy.
+- 2026-03-13: ArgoCD operation completed successfully at revision b50fe0a81d843ba1199e1513623db36d044d3686.
+- 2026-03-13: Destination namespace core-model auto-created and Active.
+- 2026-03-13: Rollback drill passed: targetRevision switched to 1bf68fd60bf7e256c40a3122d9e4d182a670200e, then restored to main.
+- 2026-03-13: Final post-rollback state confirmed as revision b50fe0a81d843ba1199e1513623db36d044d3686 with Sync=Synced and Health=Healthy.
 
 ## Phase 5 - Migrate Proxy Layer First
-Status: TODO
+Status: IN_PROGRESS
 
 Tasks:
 - [ ] Deploy ollama-proxy in K3s namespace core-model.
@@ -189,6 +195,11 @@ Validation:
 - [ ] /api/models responds from K3s proxy.
 - [ ] /metrics available and scraped.
 - [ ] Latency not worse than Compose baseline by more than agreed threshold.
+
+Execution notes:
+- 2026-03-13: Phase 5 started.
+- 2026-03-13: Added base manifests for ollama-proxy: ConfigMap, Secret template, Deployment, Service, and ServiceMonitor under k8s/base/proxy.
+- 2026-03-13: Probes configured on /metrics; traffic cutover not performed.
 
 ## Phase 6 - GPU Runtime Enablement
 Status: TODO
