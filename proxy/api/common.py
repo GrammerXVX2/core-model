@@ -5,10 +5,8 @@ from typing import Any, Dict, List
 
 from settings import (
     DEFAULT_RESPONSE_LANGUAGE,
-    DISABLE_THINKING,
     LANGUAGE_INSTRUCTION_DEFAULT,
     LANGUAGE_INSTRUCTION_RU,
-    LANGUAGE_INSTRUCTION_RU_FINAL_ONLY,
     LOG_TEXT_PREVIEW_CHARS,
     MAX_CONTEXT_TOKENS,
     MAX_TOKENS_CAP,
@@ -47,10 +45,7 @@ def safe_preview(value: Any) -> Any:
 def language_instruction() -> str:
     lang = DEFAULT_RESPONSE_LANGUAGE.lower()
     if lang in {"ru", "russian", "рус", "русский"}:
-        base = LANGUAGE_INSTRUCTION_RU
-        if DISABLE_THINKING:
-            return f"{base} {LANGUAGE_INSTRUCTION_RU_FINAL_ONLY}".strip()
-        return base
+        return LANGUAGE_INSTRUCTION_RU
     return LANGUAGE_INSTRUCTION_DEFAULT
 
 
@@ -164,4 +159,4 @@ def ollama_response(model: str, content: str, start_ns: int, load_ns: int = 0, d
 
 
 def sse_event(payload: Dict[str, Any]) -> str:
-    return f"data: {json.dumps(payload, ensure_ascii=False)}\\n\\n"
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"

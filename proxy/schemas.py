@@ -24,7 +24,11 @@ class ChatRequestModel(BaseModel):
     )
     temperature: float = Field(default=0.7, description="Sampling temperature.")
     max_tokens: Optional[int] = Field(default=None, description="Requested max output tokens.")
-    stream: bool = Field(default=False, description="Streaming is not supported.")
+    stream: bool = Field(default=False, description="When true, /api/chat returns an Ollama-compatible NDJSON stream.")
+    reasoning: Optional[bool] = Field(
+        default=None,
+        description="Optional reasoning toggle for llama routes (q4/q6). Passed as enable_thinking.",
+    )
     options: Optional[ChatOptions] = Field(default=None, description="Ollama options.")
 
 
@@ -34,7 +38,7 @@ class GenerateRequestModel(BaseModel):
     prompt: Optional[str] = Field(default=None, description="Input prompt.", examples=["Объясни разницу между REST и gRPC."])
     temperature: float = Field(default=0.7, description="Sampling temperature.")
     max_tokens: Optional[int] = Field(default=None, description="Requested max output tokens.")
-    stream: bool = Field(default=False, description="Streaming is not supported.")
+    stream: bool = Field(default=False, description="Streaming is currently not supported on /api/generate.")
     options: Optional[ChatOptions] = Field(default=None, description="Ollama options.")
 
 

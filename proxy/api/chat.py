@@ -11,10 +11,14 @@ from schemas import OllamaTextResponseModel
 from settings import (
     CHAT_DEBUG_LOG,
     CHAT_EMPTY_FALLBACK_USER_TEXT,
+    CPU_CHAT_Q4_MODEL,
+    CPU_CHAT_Q6_MODEL,
     DISABLE_THINKING,
+    PUBLIC_CPU_CHAT_Q4_MODEL,
+    PUBLIC_CPU_CHAT_Q6_MODEL,
 )
 from services.request_parser import read_request_body_as_dict as _read_request_body_as_dict
-from services.routing import _normalize_model_name, _resolve_chat_target
+from services.routing import _resolve_chat_target
 from services.status_cache import ensure_model_available as _ensure_model_available
 from services.upstream import post_json_to as _post_json_to
 
@@ -26,6 +30,7 @@ from api.common import (
     inject_system_language_prompt,
     language_instruction,
     ns,
+    now_iso,
     ollama_response,
     resolve_max_tokens,
     safe_preview,
@@ -35,6 +40,49 @@ from api.common import (
 
 logger = logging.getLogger("uvicorn.error")
 router = APIRouter(tags=["chat", "generate"])
+
+
+def _coerce_bool(value: Any) -> Any:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        if value in (0, 1):
+            return bool(value)
+        return None
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return None
+
+
+def _extract_reasoning_flag(body_data: Dict[str, Any]) -> Any:
+    for key in ("reasoning", "thinking", "enable_thinking"):
+        if key in body_data:
+            parsed = _coerce_bool(body_data.get(key))
+            if parsed is not None:
+                return parsed
+
+    options = body_data.get("options")
+    if isinstance(options, dict):
+        for key in ("reasoning", "thinking", "enable_thinking"):
+            if key in options:
+                parsed = _coerce_bool(options.get(key))
+                if parsed is not None:
+                    return parsed
+
+    return None
+
+
+def _is_llama_route(target: Dict[str, str]) -> bool:
+    public_model = target.get("public_model", "")
+    backend_model = target.get("vllm_model", "")
+    return public_model in {PUBLIC_CPU_CHAT_Q4_MODEL, PUBLIC_CPU_CHAT_Q6_MODEL} or backend_model in {
+        CPU_CHAT_Q4_MODEL,
+        CPU_CHAT_Q6_MODEL,
+    }
 
 CHAT_OPENAPI_EXTRA = {
     "requestBody": {
@@ -122,7 +170,7 @@ GENERATE_OPENAPI_EXTRA = {
     response_model=OllamaTextResponseModel,
     openapi_extra=CHAT_OPENAPI_EXTRA,
 )
-async def api_chat(request: Request) -> Dict[str, Any]:
+async def api_chat(request: Request) -> Any:
     body_data = await _read_request_body_as_dict(request)
     if CHAT_DEBUG_LOG:
         logger.info("chat.incoming body=%s", safe_preview(body_data))
@@ -153,9 +201,6 @@ async def api_chat(request: Request) -> Dict[str, Any]:
     messages = inject_system_language_prompt(messages)
     stream = bool(body_data.get("stream", False))
 
-    if stream:
-        raise HTTPException(status_code=501, detail="stream not implemented")
-
     start_ns = ns()
     estimated_input_tokens = estimate_chat_input_tokens(messages)
     resolved_max_tokens = resolve_max_tokens(body_data, estimated_input_tokens=estimated_input_tokens)
@@ -165,8 +210,26 @@ async def api_chat(request: Request) -> Dict[str, Any]:
         "temperature": body_data.get("temperature", 0.7),
         "max_tokens": resolved_max_tokens,
     }
-    if DISABLE_THINKING and "qwen" in _normalize_model_name(target["vllm_model"]):
-        payload["chat_template_kwargs"] = {"enable_thinking": False}
+    reasoning_flag = _extract_reasoning_flag(body_data)
+    if _is_llama_route(target):
+        if reasoning_flag is not None:
+            payload["chat_template_kwargs"] = {"enable_thinking": reasoning_flag}
+        elif DISABLE_THINKING:
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
+
+    if stream:
+        stream_payload = {**payload, "stream": True}
+        return StreamingResponse(
+            _stream_chat_ollama_events(
+                target,
+                stream_payload,
+                model,
+                start_ns,
+                include_reasoning=reasoning_flag is True,
+            ),
+            media_type="application/x-ndjson",
+            headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+        )
 
     if CHAT_DEBUG_LOG:
         roles = [str(m.get("role", "")) for m in messages[:10]]
@@ -198,9 +261,98 @@ async def api_chat(request: Request) -> Dict[str, Any]:
     return ollama_response(model, content, start_ns, done_reason=done_reason)
 
 
-async def _stream_chat_ui_events(target: Dict[str, str], payload: Dict[str, Any], public_model: str):
+async def _stream_chat_ollama_events(
+    target: Dict[str, str],
+    payload: Dict[str, Any],
+    public_model: str,
+    start_ns: int,
+    include_reasoning: bool = False,
+):
+    url = f"{target['base_url'].rstrip('/')}/chat/completions"
+    final_reason = "stop"
+
+    try:
+        async with httpx.AsyncClient(timeout=None) as client:
+            async with client.stream("POST", url, json=payload) as resp:
+                if resp.status_code >= 400:
+                    detail = await resp.aread()
+                    message = detail.decode("utf-8", errors="ignore")
+                    raise HTTPException(status_code=resp.status_code, detail=message)
+
+                async for raw_line in resp.aiter_lines():
+                    line = (raw_line or "").strip()
+                    if not line or line.startswith(":"):
+                        continue
+                    if line.startswith("data:"):
+                        line = line[5:].strip()
+
+                    if line == "[DONE]":
+                        break
+
+                    try:
+                        chunk = json.loads(line)
+                    except Exception:
+                        continue
+
+                    choice = (chunk.get("choices") or [{}])[0]
+                    delta = choice.get("delta") or {}
+                    finish_reason = choice.get("finish_reason")
+                    if isinstance(finish_reason, str) and finish_reason:
+                        final_reason = finish_reason
+
+                    token = delta.get("content")
+                    if token is None and include_reasoning:
+                        token = delta.get("reasoning_content")
+                    if token is None:
+                        continue
+
+                    token_text = str(token)
+                    if not token_text:
+                        continue
+
+                    yield json.dumps(
+                        {
+                            "model": public_model,
+                            "created_at": now_iso(),
+                            "message": {"role": "assistant", "content": token_text},
+                            "done": False,
+                        },
+                        ensure_ascii=False,
+                    ) + "\n"
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"upstream stream error: {str(exc) or exc.__class__.__name__}")
+
+    end_ns = ns()
+    total_ns = max(0, end_ns - start_ns)
+    yield json.dumps(
+        {
+            "model": public_model,
+            "created_at": now_iso(),
+            "message": {"role": "assistant", "content": ""},
+            "done": True,
+            "done_reason": final_reason,
+            "total_duration": total_ns,
+            "load_duration": 0,
+            "prompt_eval_count": 0,
+            "prompt_eval_duration": 0,
+            "eval_count": 0,
+            "eval_duration": 0,
+        },
+        ensure_ascii=False,
+    ) + "\n"
+
+
+async def _stream_chat_ui_events(
+    target: Dict[str, str],
+    payload: Dict[str, Any],
+    public_model: str,
+    include_reasoning: bool = False,
+):
     url = f"{target['base_url'].rstrip('/')}/chat/completions"
     total_text = ""
+    terminal_emitted = False
 
     yield sse_event({"type": "start", "model": public_model})
 
@@ -209,6 +361,7 @@ async def _stream_chat_ui_events(target: Dict[str, str], payload: Dict[str, Any]
             async with client.stream("POST", url, json=payload) as resp:
                 if resp.status_code >= 400:
                     detail = await resp.aread()
+                    terminal_emitted = True
                     yield sse_event(
                         {
                             "type": "error",
@@ -216,6 +369,7 @@ async def _stream_chat_ui_events(target: Dict[str, str], payload: Dict[str, Any]
                             "detail": detail.decode("utf-8", errors="ignore"),
                         }
                     )
+                    yield "data: [DONE]\n\n"
                     return
 
                 async for raw_line in resp.aiter_lines():
@@ -235,19 +389,31 @@ async def _stream_chat_ui_events(target: Dict[str, str], payload: Dict[str, Any]
 
                     choice = (chunk.get("choices") or [{}])[0]
                     delta = choice.get("delta") or {}
-                    token = delta.get("content")
-                    if token is None:
+
+                    content_token = delta.get("content")
+                    reasoning_token = delta.get("reasoning_content") if include_reasoning else None
+
+                    if reasoning_token is not None:
+                        token_text = str(reasoning_token)
+                        if token_text:
+                            yield sse_event({"type": "token", "model": public_model, "token": token_text, "is_reasoning": True})
                         continue
 
-                    token_text = str(token)
+                    if content_token is None:
+                        continue
+                    token_text = str(content_token)
                     if not token_text:
                         continue
                     total_text += token_text
                     yield sse_event({"type": "token", "model": public_model, "token": token_text})
 
+        terminal_emitted = True
         yield sse_event({"type": "done", "model": public_model, "text": total_text})
+        yield "data: [DONE]\n\n"
     except Exception as exc:
-        yield sse_event({"type": "error", "status": 500, "detail": str(exc)})
+        if not terminal_emitted:
+            yield sse_event({"type": "error", "status": 500, "detail": str(exc)})
+            yield "data: [DONE]\n\n"
 
 
 @router.post(
@@ -292,8 +458,12 @@ async def api_chat_ui(request: Request) -> StreamingResponse:
         "max_tokens": resolved_max_tokens,
         "stream": True,
     }
-    if DISABLE_THINKING and "qwen" in _normalize_model_name(target["vllm_model"]):
-        payload["chat_template_kwargs"] = {"enable_thinking": False}
+    reasoning_flag = _extract_reasoning_flag(body_data)
+    if _is_llama_route(target):
+        if reasoning_flag is not None:
+            payload["chat_template_kwargs"] = {"enable_thinking": reasoning_flag}
+        elif DISABLE_THINKING:
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
 
     if CHAT_DEBUG_LOG:
         logger.info(
@@ -307,9 +477,9 @@ async def api_chat_ui(request: Request) -> StreamingResponse:
         )
 
     return StreamingResponse(
-        _stream_chat_ui_events(target, payload, model),
+        _stream_chat_ui_events(target, payload, model, include_reasoning=reasoning_flag is True),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
     )
 
 

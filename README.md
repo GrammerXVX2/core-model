@@ -24,6 +24,7 @@ Endpoints
 - POST http://localhost:11434/api/generate
 
 Notes
-- Streaming is not implemented yet.
+- `/api/chat` supports Ollama-compatible NDJSON streaming (`stream=true`).
+- `/api/generate` streaming is not implemented yet.
 - Adjust --max-num-seqs and --gpu-memory-utilization in docker-compose.yml based on load.
 - vLLM is pinned to `vllm/vllm-openai:nightly` for Qwen3.5 compatibility.

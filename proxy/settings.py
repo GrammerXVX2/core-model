@@ -47,8 +47,8 @@ CPU_CHAT_Q6_MAX_CONTEXT_TOKENS = int(os.getenv("CPU_CHAT_Q6_MAX_CONTEXT_TOKENS",
 
 DEFAULT_RESPONSE_LANGUAGE = os.getenv("DEFAULT_RESPONSE_LANGUAGE", "ru")
 DISABLE_THINKING = os.getenv("DISABLE_THINKING", "1") == "1"
-DEFAULT_MAX_TOKENS = int(os.getenv("VLLM_DEFAULT_MAX_TOKENS", "256"))
-MAX_TOKENS_CAP = int(os.getenv("VLLM_MAX_TOKENS_CAP", "1024"))
+DEFAULT_MAX_TOKENS = int(os.getenv("VLLM_DEFAULT_MAX_TOKENS", "32768"))
+MAX_TOKENS_CAP = int(os.getenv("VLLM_MAX_TOKENS_CAP", "16384"))
 MAX_CONTEXT_TOKENS = int(os.getenv("VLLM_MAX_CONTEXT_TOKENS", "4096"))
 MIN_CONTEXT_HEADROOM = int(os.getenv("VLLM_MIN_CONTEXT_HEADROOM", "256"))
 CHAT_DEBUG_LOG = os.getenv("CHAT_DEBUG_LOG", "1") == "1"
@@ -60,13 +60,9 @@ LANGUAGE_INSTRUCTION_RU = os.getenv(
     "LANGUAGE_INSTRUCTION_RU",
     "Отвечай только на русском языке.",
 )
-LANGUAGE_INSTRUCTION_RU_FINAL_ONLY = os.getenv(
-    "LANGUAGE_INSTRUCTION_RU_FINAL_ONLY",
-    "Не показывай ход рассуждений, верни только финальный ответ.",
-)
 LANGUAGE_INSTRUCTION_DEFAULT = os.getenv(
     "LANGUAGE_INSTRUCTION_DEFAULT",
-    "Answer in the configured default language. Provide only the final answer.",
+    "Answer in the configured default language.",
 )
 REASONING_PREFIX_MARKERS = [
     m.strip()

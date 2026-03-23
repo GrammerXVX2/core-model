@@ -33,7 +33,7 @@ services:
     volumes:
       - hf-cache:/root/.cache/huggingface
     ipc: host
-    gpus: "all"
+#    gpus: "all"
     ports:
       - "8001:8000"
 
@@ -58,8 +58,8 @@ services:
       - QWEN_EMBED_4B_BASE_URL=${QWEN_EMBED_4B_BASE_URL:-}
       - DEFAULT_RESPONSE_LANGUAGE=${DEFAULT_RESPONSE_LANGUAGE:-ru}
       - DISABLE_THINKING=${DISABLE_THINKING:-1}
-      - VLLM_DEFAULT_MAX_TOKENS=${VLLM_DEFAULT_MAX_TOKENS:-512}
-      - VLLM_MAX_TOKENS_CAP=${VLLM_MAX_TOKENS_CAP:-1024}
+      - VLLM_DEFAULT_MAX_TOKENS=${VLLM_DEFAULT_MAX_TOKENS:-32768}
+      - VLLM_MAX_TOKENS_CAP=${VLLM_MAX_TOKENS_CAP:-16384}
       - VLLM_MAX_CONTEXT_TOKENS=${VLLM_MAX_CONTEXT_TOKENS:-32768}
       - VLLM_MIN_CONTEXT_HEADROOM=${VLLM_MIN_CONTEXT_HEADROOM:-256}
       - PROXY_PORT=${PROXY_PORT:-11434}
@@ -90,8 +90,8 @@ services:
       - CPU_CHAT_Q6_BASE_URL=${CPU_CHAT_Q6_BASE_URL:-}
       - PUBLIC_CPU_CHAT_Q6_MODEL=${PUBLIC_CPU_CHAT_Q6_MODEL:-}
       - CPU_CHAT_Q6_MAX_CONTEXT_TOKENS=${CPU_CHAT_Q6_MAX_CONTEXT_TOKENS:-8192}
-    depends_on:
-      - vllm-gpu0
+ #   depends_on:
+ #    - vllm-gpu0
     ports:
       - "11434:11434"
 
