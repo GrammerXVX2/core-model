@@ -1,11 +1,29 @@
 import hashlib
+import asyncio
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
-from schemas import ModelStatusItem
-from services.status_cache import get_models_snapshot as _get_models_snapshot
+from schemas import (
+    ModelRegistryCrudPayload,
+    ModelRegistryCrudResponse,
+    ModelRegistryItem,
+    ModelRegistryUpsertRequest,
+    ModelRegistryUpsertResponse,
+    ModelStatusItem,
+)
+from services.model_registry import (
+    create_registry_check as _create_registry_check,
+    disable_registry_check_by_id as _disable_registry_check_by_id,
+    get_registry_check_by_id as _get_registry_check_by_id,
+    update_registry_check_by_id as _update_registry_check_by_id,
+    upsert_registry_check as _upsert_registry_check,
+)
+from services.status_cache import (
+    get_models_snapshot as _get_models_snapshot,
+    refresh_model_status_cache as _refresh_model_status_cache,
+)
 
 router = APIRouter(tags=["models"])
 
@@ -124,3 +142,177 @@ async def api_tags() -> Dict[str, List[Dict[str, Any]]]:
         deduped[tag_item["name"]] = tag_item
 
     return {"models": list(deduped.values())}
+
+
+def _validate_registry_payload(payload: ModelRegistryCrudPayload) -> None:
+    if payload.default_max_tokens > payload.max_context_tokens:
+        raise HTTPException(status_code=400, detail="default_max_tokens cannot exceed max_context_tokens")
+    if payload.max_tokens_cap < payload.default_max_tokens:
+        raise HTTPException(status_code=400, detail="max_tokens_cap cannot be smaller than default_max_tokens")
+
+
+def _payload_to_check(payload: ModelRegistryCrudPayload) -> Dict[str, Any]:
+    aliases = {payload.public_model.strip(), payload.vllm_model.strip()}
+    aliases.update(a.strip() for a in (payload.aliases or []) if str(a).strip())
+
+    return {
+        "public_model": payload.public_model.strip(),
+        "vllm_model": payload.vllm_model.strip(),
+        "type": payload.model_type,
+        "base_url": payload.base_url.strip().rstrip("/"),
+        "max_context_tokens": int(payload.max_context_tokens),
+        "default_max_tokens": int(payload.default_max_tokens),
+        "max_tokens_cap": int(payload.max_tokens_cap),
+        "min_context_headroom": int(payload.min_context_headroom),
+        "stream_supported": bool(payload.stream_supported),
+        "reasoning_supported": bool(payload.reasoning_supported),
+        "aliases": aliases,
+    }
+
+
+def _row_to_crud_response(row: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "status": "ok",
+        "model": {
+            "id": int(row.get("id") or 0),
+            "public_model": str(row.get("public_model") or ""),
+            "vllm_model": str(row.get("vllm_model") or ""),
+            "model_type": str(row.get("model_type") or row.get("type") or "chat"),
+            "base_url": str(row.get("base_url") or "").rstrip("/"),
+            "max_context_tokens": int(row.get("max_context_tokens") or 0),
+            "default_max_tokens": int(row.get("default_max_tokens") or 0),
+            "max_tokens_cap": int(row.get("max_tokens_cap") or 0),
+            "min_context_headroom": int(row.get("min_context_headroom") or 0),
+            "stream_supported": bool(row.get("stream_supported") or False),
+            "reasoning_supported": bool(row.get("reasoning_supported") or False),
+            "aliases": list(row.get("aliases") or []),
+            "is_enabled": bool(row.get("is_enabled") if row.get("is_enabled") is not None else True),
+        },
+    }
+
+
+@router.post(
+    "/api/models",
+    tags=["models"],
+    summary="Create Model Route",
+    response_model=ModelRegistryCrudResponse,
+)
+async def api_create_model(payload: ModelRegistryCrudPayload) -> Dict[str, Any]:
+    _validate_registry_payload(payload)
+    try:
+        row = await _create_registry_check(_payload_to_check(payload))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"registry create failed: {str(exc)}")
+
+    asyncio.create_task(_refresh_model_status_cache())
+    return _row_to_crud_response(row)
+
+
+@router.get(
+    "/api/models/{model_id}",
+    tags=["models"],
+    summary="Get Model Route By ID",
+    response_model=ModelRegistryCrudResponse,
+)
+async def api_get_model(model_id: int) -> Dict[str, Any]:
+    row = await _get_registry_check_by_id(int(model_id))
+    if not row:
+        raise HTTPException(status_code=404, detail=f"model not found: id={model_id}")
+    return _row_to_crud_response(row)
+
+
+@router.put(
+    "/api/models/{model_id}",
+    tags=["models"],
+    summary="Update Model Route By ID",
+    response_model=ModelRegistryCrudResponse,
+)
+async def api_update_model(model_id: int, payload: ModelRegistryCrudPayload) -> Dict[str, Any]:
+    _validate_registry_payload(payload)
+    try:
+        row = await _update_registry_check_by_id(int(model_id), _payload_to_check(payload))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"registry update failed: {str(exc)}")
+    if not row:
+        raise HTTPException(status_code=404, detail=f"model not found: id={model_id}")
+
+    asyncio.create_task(_refresh_model_status_cache())
+    return _row_to_crud_response(row)
+
+
+@router.delete(
+    "/api/models/{model_id}",
+    tags=["models"],
+    summary="Disable Model Route By ID",
+    response_model=ModelRegistryCrudResponse,
+)
+async def api_delete_model(model_id: int) -> Dict[str, Any]:
+    try:
+        row = await _disable_registry_check_by_id(int(model_id))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"registry delete failed: {str(exc)}")
+    if not row:
+        raise HTTPException(status_code=404, detail=f"model not found: id={model_id}")
+
+    asyncio.create_task(_refresh_model_status_cache())
+    return _row_to_crud_response(row)
+
+
+@router.post(
+    "/api/models/register",
+    tags=["models"],
+    summary="Register or Update Model Route",
+    response_model=ModelRegistryUpsertResponse,
+)
+async def api_register_model(payload: ModelRegistryUpsertRequest) -> Dict[str, Any]:
+    if payload.default_max_tokens > payload.max_context_tokens:
+        raise HTTPException(status_code=400, detail="default_max_tokens cannot exceed max_context_tokens")
+    if payload.max_tokens_cap < payload.default_max_tokens:
+        raise HTTPException(status_code=400, detail="max_tokens_cap cannot be smaller than default_max_tokens")
+
+    aliases = {payload.public_model.strip(), payload.vllm_model.strip()}
+    aliases.update(a.strip() for a in (payload.aliases or []) if str(a).strip())
+
+    check = {
+        "public_model": payload.public_model.strip(),
+        "vllm_model": payload.vllm_model.strip(),
+        "type": payload.model_type,
+        "base_url": payload.base_url.strip().rstrip("/"),
+        "max_context_tokens": int(payload.max_context_tokens),
+        "default_max_tokens": int(payload.default_max_tokens),
+        "max_tokens_cap": int(payload.max_tokens_cap),
+        "min_context_headroom": int(payload.min_context_headroom),
+        "stream_supported": bool(payload.stream_supported),
+        "reasoning_supported": bool(payload.reasoning_supported),
+        "aliases": aliases,
+    }
+
+    try:
+        row = await _upsert_registry_check(check)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"registry upsert failed: {str(exc)}")
+
+    asyncio.create_task(_refresh_model_status_cache())
+
+    return {
+        "status": "ok",
+        "model": {
+            "id": int(row.get("id") or 0),
+            "model": row["public_model"],
+            "model_vllm": row["vllm_model"],
+            "type": row["type"],
+            "base_url": row["base_url"],
+            "max_context_tokens": row["max_context_tokens"],
+            "status": "registered",
+            "detail": "model saved to registry; status refresh started",
+        },
+        "aliases": row["aliases"],
+    }

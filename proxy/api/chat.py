@@ -11,18 +11,16 @@ from schemas import OllamaTextResponseModel
 from settings import (
     CHAT_DEBUG_LOG,
     CHAT_EMPTY_FALLBACK_USER_TEXT,
-    CPU_CHAT_Q4_MODEL,
-    CPU_CHAT_Q6_MODEL,
     DISABLE_THINKING,
-    PUBLIC_CPU_CHAT_Q4_MODEL,
-    PUBLIC_CPU_CHAT_Q6_MODEL,
+    TOKEN_BUDGET_STRICT_MODE,
 )
 from services.request_parser import read_request_body_as_dict as _read_request_body_as_dict
-from services.routing import _resolve_chat_target
 from services.status_cache import ensure_model_available as _ensure_model_available
+from services.status_cache import resolve_target_from_status_cache as _resolve_target_from_status_cache
 from services.upstream import post_json_to as _post_json_to
 
 from api.common import (
+    analyze_max_tokens_budget,
     estimate_chat_input_tokens,
     estimate_input_tokens_from_text,
     extract_chat_text,
@@ -32,14 +30,13 @@ from api.common import (
     ns,
     now_iso,
     ollama_response,
-    resolve_max_tokens,
     safe_preview,
     sse_event,
     strip_reasoning_prefix,
 )
 
 logger = logging.getLogger("uvicorn.error")
-router = APIRouter(tags=["chat", "generate"])
+router = APIRouter()
 
 
 def _coerce_bool(value: Any) -> Any:
@@ -76,13 +73,49 @@ def _extract_reasoning_flag(body_data: Dict[str, Any]) -> Any:
     return None
 
 
-def _is_llama_route(target: Dict[str, str]) -> bool:
-    public_model = target.get("public_model", "")
-    backend_model = target.get("vllm_model", "")
-    return public_model in {PUBLIC_CPU_CHAT_Q4_MODEL, PUBLIC_CPU_CHAT_Q6_MODEL} or backend_model in {
-        CPU_CHAT_Q4_MODEL,
-        CPU_CHAT_Q6_MODEL,
+def _stream_supported(target: Dict[str, Any]) -> bool:
+    if "stream_supported" in target:
+        return bool(target.get("stream_supported"))
+    # Backward-compatible default for legacy env chat routes.
+    return True
+
+
+def _reasoning_supported(target: Dict[str, Any]) -> bool:
+    if "reasoning_supported" in target:
+        return bool(target.get("reasoning_supported"))
+    return False
+
+
+def _maybe_raise_strict_token_budget_error(model: str, budget: Dict[str, Any]) -> None:
+    if not TOKEN_BUDGET_STRICT_MODE:
+        return
+
+    requested_output_tokens = budget.get("requested_output_tokens")
+    available_output_tokens = int(budget.get("available_output_tokens") or 0)
+    hard_cap = int(budget.get("hard_cap") or 1)
+
+    overflow_requested = requested_output_tokens is not None and int(requested_output_tokens) > hard_cap
+    no_budget_left = available_output_tokens < 1
+
+    if not overflow_requested and not no_budget_left:
+        return
+
+    detail = {
+        "error": "token_budget_exceeded",
+        "model": model,
+        "message": "Requested output exceeds available token budget for this model.",
+        "estimated_input_tokens": int(budget.get("estimated_input_tokens") or 0),
+        "model_max_context_tokens": int(budget.get("max_context_tokens") or 0),
+        "min_context_headroom": int(budget.get("min_context_headroom") or 0),
+        "available_output_tokens": available_output_tokens,
+        "requested_output_tokens": requested_output_tokens,
+        "requested_source": budget.get("requested_source"),
+        "max_tokens_cap": int(budget.get("max_tokens_cap") or 0),
+        "hard_cap": hard_cap,
+        "resolved_max_tokens": int(budget.get("resolved_max_tokens") or 1),
+        "hint": "Reduce input size, lower requested max_tokens, or raise model-specific context/cap limits.",
     }
+    raise HTTPException(status_code=400, detail=detail)
 
 CHAT_OPENAPI_EXTRA = {
     "requestBody": {
@@ -111,7 +144,7 @@ CHAT_OPENAPI_EXTRA = {
                         "value": {
                             "model": os.getenv(
                                 "OPENAPI_MINISTRAL_CHAT_EXAMPLE_MODEL",
-                                os.getenv("PUBLIC_MINISTRAL_CHAT_MODEL", "Ministral3-14B"),
+                                "Ministral3-14B",
                             ),
                             "temperature": 0.2,
                             "messages": [
@@ -150,7 +183,7 @@ GENERATE_OPENAPI_EXTRA = {
                         "value": {
                             "model": os.getenv(
                                 "OPENAPI_MINISTRAL_GENERATE_EXAMPLE_MODEL",
-                                os.getenv("PUBLIC_MINISTRAL_CHAT_MODEL", "Ministral3-14B"),
+                                "Ministral3-14B",
                             ),
                             "prompt": "Сформулируй краткое определение понятия сервитута.",
                             "temperature": 0.2,
@@ -160,6 +193,65 @@ GENERATE_OPENAPI_EXTRA = {
             }
         },
     }
+}
+
+
+CHAT_UI_OPENAPI_EXTRA = {
+    "requestBody": {
+        "required": True,
+        "content": {
+            "application/json": {
+                "examples": {
+                    "ui_stream": {
+                        "summary": "UI stream mode",
+                        "value": {
+                            "model": os.getenv("OPENAPI_CHAT_UI_EXAMPLE_MODEL", "Qwen3.5-9B"),
+                            "stream": True,
+                            "reasoning": False,
+                            "temperature": 0,
+                            "messages": [
+                                {
+                                    "role": "user",
+                                    "content": "Answer in one short sentence.",
+                                }
+                            ],
+                        },
+                    },
+                    "ui_non_stream": {
+                        "summary": "UI non-stream mode",
+                        "value": {
+                            "model": os.getenv("OPENAPI_CHAT_UI_EXAMPLE_MODEL", "Qwen3.5-9B"),
+                            "stream": False,
+                            "reasoning": True,
+                            "max_tokens": 128,
+                            "messages": [
+                                {
+                                    "role": "user",
+                                    "content": "Summarize token budgeting in two bullets.",
+                                }
+                            ],
+                        },
+                    },
+                }
+            }
+        },
+    },
+    "responses": {
+        "200": {
+            "description": "When stream=true returns text/event-stream (SSE). When stream=false returns Ollama-style JSON.",
+            "content": {
+                "text/event-stream": {
+                    "schema": {
+                        "type": "string",
+                        "example": "data: {\"type\": \"start\", \"model\": \"Qwen3.5-9B\"}\\n\\ndata: [DONE]\\n\\n",
+                    }
+                },
+                "application/json": {
+                    "schema": {"$ref": "#/components/schemas/OllamaTextResponseModel"}
+                },
+            },
+        }
+    },
 }
 
 
@@ -176,8 +268,9 @@ async def api_chat(request: Request) -> Any:
         logger.info("chat.incoming body=%s", safe_preview(body_data))
 
     requested_model = body_data.get("model")
-    target = _resolve_chat_target(requested_model)
-    await _ensure_model_available(target)
+    target = await _resolve_target_from_status_cache(requested_model, expected_type="chat")
+    if target is None:
+        raise HTTPException(status_code=503, detail="no chat models registered in status cache")
     model = requested_model or target["public_model"]
     messages: List[Dict[str, Any]] = body_data.get("messages", [])
 
@@ -200,36 +293,31 @@ async def api_chat(request: Request) -> Any:
         messages = [{"role": "user", "content": CHAT_EMPTY_FALLBACK_USER_TEXT}]
     messages = inject_system_language_prompt(messages)
     stream = bool(body_data.get("stream", False))
+    if stream:
+        raise HTTPException(status_code=501, detail="stream is not supported on /api/chat; use /api/chat-ui")
 
     start_ns = ns()
     estimated_input_tokens = estimate_chat_input_tokens(messages)
-    resolved_max_tokens = resolve_max_tokens(body_data, estimated_input_tokens=estimated_input_tokens)
+    token_budget = analyze_max_tokens_budget(
+        body_data,
+        estimated_input_tokens=estimated_input_tokens,
+        max_context_tokens=target.get("max_context_tokens"),
+        max_tokens_cap=target.get("max_tokens_cap"),
+        min_context_headroom=target.get("min_context_headroom"),
+        default_max_tokens=target.get("default_max_tokens"),
+    )
+    _maybe_raise_strict_token_budget_error(model, token_budget)
+    resolved_max_tokens = int(token_budget["resolved_max_tokens"])
     payload = {
         "model": target["vllm_model"],
         "messages": messages,
         "temperature": body_data.get("temperature", 0.7),
         "max_tokens": resolved_max_tokens,
     }
-    reasoning_flag = _extract_reasoning_flag(body_data)
-    if _is_llama_route(target):
-        if reasoning_flag is not None:
-            payload["chat_template_kwargs"] = {"enable_thinking": reasoning_flag}
-        elif DISABLE_THINKING:
-            payload["chat_template_kwargs"] = {"enable_thinking": False}
+    # /api/chat always runs with reasoning disabled; UI toggle lives only in /api/chat-ui.
+    payload["chat_template_kwargs"] = {"enable_thinking": False}
 
-    if stream:
-        stream_payload = {**payload, "stream": True}
-        return StreamingResponse(
-            _stream_chat_ollama_events(
-                target,
-                stream_payload,
-                model,
-                start_ns,
-                include_reasoning=reasoning_flag is True,
-            ),
-            media_type="application/x-ndjson",
-            headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
-        )
+    await _ensure_model_available(target)
 
     if CHAT_DEBUG_LOG:
         roles = [str(m.get("role", "")) for m in messages[:10]]
@@ -420,17 +508,20 @@ async def _stream_chat_ui_events(
     "/api/chat-ui",
     tags=["chat"],
     summary="Chat Completion Stream (UI)",
+    openapi_extra=CHAT_UI_OPENAPI_EXTRA,
 )
 @router.post(
     "/api/chat/ui",
     tags=["chat"],
     summary="Chat Completion Stream (UI Alias)",
+    openapi_extra=CHAT_UI_OPENAPI_EXTRA,
 )
-async def api_chat_ui(request: Request) -> StreamingResponse:
+async def api_chat_ui(request: Request) -> Any:
     body_data = await _read_request_body_as_dict(request)
     requested_model = body_data.get("model")
-    target = _resolve_chat_target(requested_model)
-    await _ensure_model_available(target)
+    target = await _resolve_target_from_status_cache(requested_model, expected_type="chat")
+    if target is None:
+        raise HTTPException(status_code=503, detail="no chat models registered in status cache")
     model = requested_model or target["public_model"]
 
     messages: List[Dict[str, Any]] = body_data.get("messages", [])
@@ -449,21 +540,38 @@ async def api_chat_ui(request: Request) -> StreamingResponse:
 
     messages = inject_system_language_prompt(messages)
     estimated_input_tokens = estimate_chat_input_tokens(messages)
-    resolved_max_tokens = resolve_max_tokens(body_data, estimated_input_tokens=estimated_input_tokens)
+    token_budget = analyze_max_tokens_budget(
+        body_data,
+        estimated_input_tokens=estimated_input_tokens,
+        max_context_tokens=target.get("max_context_tokens"),
+        max_tokens_cap=target.get("max_tokens_cap"),
+        min_context_headroom=target.get("min_context_headroom"),
+        default_max_tokens=target.get("default_max_tokens"),
+    )
+    _maybe_raise_strict_token_budget_error(model, token_budget)
+    resolved_max_tokens = int(token_budget["resolved_max_tokens"])
 
     payload = {
         "model": target["vllm_model"],
         "messages": messages,
         "temperature": body_data.get("temperature", 0.7),
         "max_tokens": resolved_max_tokens,
-        "stream": True,
     }
+    stream = bool(body_data.get("stream", True))
+    payload["stream"] = stream
     reasoning_flag = _extract_reasoning_flag(body_data)
-    if _is_llama_route(target):
+    if reasoning_flag is not None and not _reasoning_supported(target):
+        raise HTTPException(status_code=400, detail=f"model does not support reasoning toggle: {model}")
+    if _reasoning_supported(target):
         if reasoning_flag is not None:
             payload["chat_template_kwargs"] = {"enable_thinking": reasoning_flag}
         elif DISABLE_THINKING:
             payload["chat_template_kwargs"] = {"enable_thinking": False}
+
+    if stream and not _stream_supported(target):
+        raise HTTPException(status_code=400, detail=f"model does not support stream mode: {model}")
+
+    await _ensure_model_available(target)
 
     if CHAT_DEBUG_LOG:
         logger.info(
@@ -475,6 +583,13 @@ async def api_chat_ui(request: Request) -> StreamingResponse:
             estimated_input_tokens,
             resolved_max_tokens,
         )
+
+    if not stream:
+        start_ns = ns()
+        data = await _post_json_to(target["base_url"], "/chat/completions", payload)
+        content = strip_reasoning_prefix(extract_chat_text(data))
+        done_reason = extract_finish_reason(data)
+        return ollama_response(model, content, start_ns, done_reason=done_reason)
 
     return StreamingResponse(
         _stream_chat_ui_events(target, payload, model, include_reasoning=reasoning_flag is True),
@@ -493,7 +608,9 @@ async def api_chat_ui(request: Request) -> StreamingResponse:
 async def api_generate(request: Request) -> Dict[str, Any]:
     body_data = await _read_request_body_as_dict(request)
     requested_model = body_data.get("model")
-    target = _resolve_chat_target(requested_model)
+    target = await _resolve_target_from_status_cache(requested_model, expected_type="chat")
+    if target is None:
+        raise HTTPException(status_code=503, detail="no chat models registered in status cache")
     await _ensure_model_available(target)
     model = requested_model or target["public_model"]
     prompt: str = str(body_data.get("prompt", ""))
@@ -505,11 +622,22 @@ async def api_generate(request: Request) -> Dict[str, Any]:
 
     start_ns = ns()
     estimated_input_tokens = estimate_input_tokens_from_text(prompt) + 16
+    token_budget = analyze_max_tokens_budget(
+        body_data,
+        estimated_input_tokens=estimated_input_tokens,
+        max_context_tokens=target.get("max_context_tokens"),
+        max_tokens_cap=target.get("max_tokens_cap"),
+        min_context_headroom=target.get("min_context_headroom"),
+        default_max_tokens=target.get("default_max_tokens"),
+    )
+    _maybe_raise_strict_token_budget_error(model, token_budget)
     payload = {
         "model": target["vllm_model"],
         "prompt": prompt,
         "temperature": body_data.get("temperature", 0.7),
-        "max_tokens": resolve_max_tokens(body_data, estimated_input_tokens=estimated_input_tokens),
+        "max_tokens": int(token_budget["resolved_max_tokens"]),
+        # /api/generate is always no-reasoning for deterministic output contract.
+        "chat_template_kwargs": {"enable_thinking": False},
     }
     data = await _post_json_to(target["base_url"], "/completions", payload)
     content = strip_reasoning_prefix(data["choices"][0]["text"])

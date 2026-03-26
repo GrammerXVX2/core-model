@@ -1,4 +1,4 @@
-from typing import Any, List, Optional
+from typing import Any, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -76,6 +76,7 @@ class EmbedResponseModel(BaseModel):
 
 
 class ModelStatusItem(BaseModel):
+    id: int = 0
     model: str
     model_vllm: str
     type: str
@@ -83,3 +84,62 @@ class ModelStatusItem(BaseModel):
     max_context_tokens: int
     status: str
     detail: str = ""
+
+
+class ModelRegistryUpsertRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    public_model: str = Field(description="Public model alias exposed by proxy.")
+    vllm_model: str = Field(description="Upstream backend model id.")
+    model_type: Literal["chat", "embeddings", "reranker"] = Field(description="Endpoint type for this model.")
+    base_url: str = Field(description="Upstream base URL, for example http://10.77.163.200:8000/v1")
+    max_context_tokens: int = Field(ge=1, description="Maximum context window for this model.")
+    default_max_tokens: int = Field(ge=1, description="Default max output tokens.")
+    max_tokens_cap: int = Field(ge=1, description="Static output cap when dynamic mode is disabled.")
+    min_context_headroom: int = Field(default=256, ge=0, description="Reserved context headroom.")
+    stream_supported: bool = Field(default=False, description="Whether stream mode is supported.")
+    reasoning_supported: bool = Field(default=False, description="Whether reasoning toggle is supported.")
+    aliases: Optional[List[str]] = Field(default=None, description="Optional additional aliases.")
+
+
+class ModelRegistryUpsertResponse(BaseModel):
+    status: str
+    model: ModelStatusItem
+    aliases: List[str]
+
+
+class ModelRegistryCrudPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    public_model: str
+    vllm_model: str
+    model_type: Literal["chat", "embeddings", "reranker"]
+    base_url: str
+    max_context_tokens: int = Field(ge=1)
+    default_max_tokens: int = Field(ge=1)
+    max_tokens_cap: int = Field(ge=1)
+    min_context_headroom: int = Field(default=256, ge=0)
+    stream_supported: bool = False
+    reasoning_supported: bool = False
+    aliases: Optional[List[str]] = None
+
+
+class ModelRegistryItem(BaseModel):
+    id: int
+    public_model: str
+    vllm_model: str
+    model_type: Literal["chat", "embeddings", "reranker"]
+    base_url: str
+    max_context_tokens: int
+    default_max_tokens: int
+    max_tokens_cap: int
+    min_context_headroom: int
+    stream_supported: bool
+    reasoning_supported: bool
+    aliases: List[str]
+    is_enabled: bool
+
+
+class ModelRegistryCrudResponse(BaseModel):
+    status: str
+    model: ModelRegistryItem

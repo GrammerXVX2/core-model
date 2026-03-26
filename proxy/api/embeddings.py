@@ -9,8 +9,8 @@ from api.common import ns, safe_preview
 from schemas import EmbedResponseModel
 from settings import EMBED_DEBUG_LOG
 from services.request_parser import read_request_body_as_dict as _read_request_body_as_dict
-from services.routing import _resolve_embed_target
 from services.status_cache import ensure_model_available as _ensure_model_available
+from services.status_cache import resolve_target_from_status_cache as _resolve_target_from_status_cache
 from services.upstream import post_json_to as _post_json_to
 
 logger = logging.getLogger("uvicorn.error")
@@ -39,13 +39,6 @@ EMBED_OPENAPI_EXTRA = {
 @router.post(
     "/api/embed",
     tags=["embeddings"],
-    summary="Embed Text (Alias)",
-    response_model=EmbedResponseModel,
-    openapi_extra=EMBED_OPENAPI_EXTRA,
-)
-@router.post(
-    "/api/embeddings",
-    tags=["embeddings"],
     summary="Embed Text",
     response_model=EmbedResponseModel,
     openapi_extra=EMBED_OPENAPI_EXTRA,
@@ -56,7 +49,9 @@ async def api_embed(request: Request) -> Dict[str, Any]:
         logger.info("embed.incoming body=%s", safe_preview(body_data))
 
     requested_model = body_data.get("model")
-    target = _resolve_embed_target(requested_model)
+    target = await _resolve_target_from_status_cache(requested_model, expected_type="embeddings")
+    if target is None:
+        raise HTTPException(status_code=503, detail="no embedding models registered in status cache")
     await _ensure_model_available(target)
     model = requested_model or target["public_model"]
     input_data = body_data.get("input")
@@ -135,7 +130,9 @@ async def api_embed(request: Request) -> Dict[str, Any]:
 async def api_dev_embeddings_info(request: Request) -> Dict[str, Any]:
     body_data = await _read_request_body_as_dict(request)
     requested_model = body_data.get("model")
-    target = _resolve_embed_target(requested_model)
+    target = await _resolve_target_from_status_cache(requested_model, expected_type="embeddings")
+    if target is None:
+        raise HTTPException(status_code=503, detail="no embedding models registered in status cache")
     await _ensure_model_available(target)
 
     probe_input = body_data.get("input")
