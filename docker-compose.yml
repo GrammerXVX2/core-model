@@ -1,67 +1,33 @@
 services:
-  vllm-gpu0:
-    image: ${VLLM_IMAGE:-vllm/vllm-openai:latest}
-    command:
-      - ${VLLM_CHAT_MODEL_TAG:-Qwen/Qwen3.5-9B}
-      - --host
-      - 0.0.0.0
-      - --port
-      - "8000"
-      - --tensor-parallel-size
-      - "${VLLM_CHAT_TP_SIZE:-2}"
-      - --dtype
-      - ${VLLM_CHAT_DTYPE:-bfloat16}
-      - --max-model-len
-      - "${VLLM_CHAT_MAX_MODEL_LEN:-32768}"
-      - --gpu-memory-utilization
-      - "${VLLM_CHAT_GPU_MEM_UTIL:-0.90}"
-      - --kv-cache-dtype
-      - ${VLLM_CHAT_KV_CACHE_DTYPE:-fp8}
-      - --disable-custom-all-reduce
-      - --swap-space
-      - "${VLLM_CHAT_SWAP_SPACE:-8}"
-      - --max-num-seqs
-      - "${VLLM_CHAT_MAX_NUM_SEQS:-8}"
-      - --max-num-batched-tokens
-      - "${VLLM_CHAT_MAX_BATCHED_TOKENS:-2048}"
-      - --enable-chunked-prefill
+  postgres:
+    image: postgres:16-alpine
     environment:
-      - HF_TOKEN=${HF_TOKEN}
-      - HF_HUB_ENABLE_HF_TRANSFER=${HF_HUB_ENABLE_HF_TRANSFER:-1}
-      - NVIDIA_VISIBLE_DEVICES=${VLLM_CHAT_VISIBLE_DEVICES:-0,1}
-      - NVIDIA_DRIVER_CAPABILITIES=${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}
-    volumes:
-      - hf-cache:/root/.cache/huggingface
-    ipc: host
-#    gpus: "all"
+      - POSTGRES_DB=${MODEL_REGISTRY_POSTGRES_DB:-model_registry}
+      - POSTGRES_USER=${MODEL_REGISTRY_POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${MODEL_REGISTRY_POSTGRES_PASSWORD:-postgres}
     ports:
-      - "8001:8000"
+      - "${MODEL_REGISTRY_POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${MODEL_REGISTRY_POSTGRES_USER:-postgres} -d ${MODEL_REGISTRY_POSTGRES_DB:-model_registry}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - model-registry-pg:/var/lib/postgresql/data
 
   ollama-proxy:
     build:
       context: ./proxy
     environment:
       - VLLM_BASE_URLS=${VLLM_BASE_URLS:-http://vllm-gpu0:8000/v1}
-      - VLLM_MODEL=${VLLM_MODEL:-Qwen/Qwen3.5-9B}
-      - VLLM_CHAT_BASE_URL=${VLLM_CHAT_BASE_URL:-http://vllm-gpu0:8000/v1}
-      - QWEN_CHAT_MODEL=${QWEN_CHAT_MODEL:-Qwen/Qwen3.5-9B}
-      - QWEN_CHAT_BASE_URL=${QWEN_CHAT_BASE_URL:-http://vllm-gpu0:8000/v1}
-      - MINISTRAL_CHAT_MODEL=${MINISTRAL_CHAT_MODEL:-Ministral-3-14B}
-      - MINISTRAL_CHAT_BASE_URL=${MINISTRAL_CHAT_BASE_URL:-http://10.77.166.156:8000/v1}
-      - VLLM_EMBED_BASE_URL=${VLLM_EMBED_BASE_URL:-http://10.77.166.156:8001/v1}
-      - VLLM_EMBED_MODEL=${VLLM_EMBED_MODEL:-Qwen3-Embedding-8B}
-      - QWEN_EMBED_MODEL=${QWEN_EMBED_MODEL:-Qwen3-Embedding-8B}
-      - QWEN_EMBED_BASE_URL=${QWEN_EMBED_BASE_URL:-http://10.77.166.156:8001/v1}
-      - QWEN_EMBED_8B_MODEL=${QWEN_EMBED_8B_MODEL:-}
-      - QWEN_EMBED_8B_BASE_URL=${QWEN_EMBED_8B_BASE_URL:-}
-      - QWEN_EMBED_4B_MODEL=${QWEN_EMBED_4B_MODEL:-}
-      - QWEN_EMBED_4B_BASE_URL=${QWEN_EMBED_4B_BASE_URL:-}
       - DEFAULT_RESPONSE_LANGUAGE=${DEFAULT_RESPONSE_LANGUAGE:-ru}
       - DISABLE_THINKING=${DISABLE_THINKING:-1}
       - VLLM_DEFAULT_MAX_TOKENS=${VLLM_DEFAULT_MAX_TOKENS:-32768}
       - VLLM_MAX_TOKENS_CAP=${VLLM_MAX_TOKENS_CAP:-16384}
       - VLLM_MAX_CONTEXT_TOKENS=${VLLM_MAX_CONTEXT_TOKENS:-32768}
       - VLLM_MIN_CONTEXT_HEADROOM=${VLLM_MIN_CONTEXT_HEADROOM:-256}
+      - TOKEN_CAP_DYNAMIC_MODE=${TOKEN_CAP_DYNAMIC_MODE:-1}
+      - TOKEN_BUDGET_STRICT_MODE=${TOKEN_BUDGET_STRICT_MODE:-1}
       - PROXY_PORT=${PROXY_PORT:-11434}
       - UPSTREAM_TIMEOUT_SECONDS=${UPSTREAM_TIMEOUT_SECONDS:-10}
       - UPSTREAM_MAX_CONNECTIONS=${UPSTREAM_MAX_CONNECTIONS:-200}
@@ -72,28 +38,15 @@ services:
       - UPSTREAM_RETRY_JITTER_SECONDS=${UPSTREAM_RETRY_JITTER_SECONDS:-0.1}
       - MODEL_STATUS_POLL_INTERVAL_SECONDS=${MODEL_STATUS_POLL_INTERVAL_SECONDS:-60}
       - MODEL_STATUS_POLL_INTERVAL_ERROR_SECONDS=${MODEL_STATUS_POLL_INTERVAL_ERROR_SECONDS:-15}
-      - PUBLIC_QWEN_CHAT_MODEL=${PUBLIC_QWEN_CHAT_MODEL:-Qwen3.5-9B}
-      - PUBLIC_QWEN_EMBED_MODEL=${PUBLIC_QWEN_EMBED_MODEL:-Qwen3-Embedding-8B}
-      - PUBLIC_QWEN_EMBED_8B_MODEL=${PUBLIC_QWEN_EMBED_8B_MODEL:-Qwen3-Embedding-8B}
-      - PUBLIC_QWEN_EMBED_4B_MODEL=${PUBLIC_QWEN_EMBED_4B_MODEL:-Qwen3-Embedding-4B}
-      - PUBLIC_MINISTRAL_CHAT_MODEL=${PUBLIC_MINISTRAL_CHAT_MODEL:-Ministral3-14B}
-      - QWEN_CHAT_MAX_CONTEXT_TOKENS=${QWEN_CHAT_MAX_CONTEXT_TOKENS:-10240}
-      - QWEN_EMBED_MAX_CONTEXT_TOKENS=${QWEN_EMBED_MAX_CONTEXT_TOKENS:-8192}
-      - QWEN_EMBED_8B_MAX_CONTEXT_TOKENS=${QWEN_EMBED_8B_MAX_CONTEXT_TOKENS:-8192}
-      - QWEN_EMBED_4B_MAX_CONTEXT_TOKENS=${QWEN_EMBED_4B_MAX_CONTEXT_TOKENS:-4096}
-      - MINISTRAL_CHAT_MAX_CONTEXT_TOKENS=${MINISTRAL_CHAT_MAX_CONTEXT_TOKENS:-8192}
-      - CPU_CHAT_Q4_MODEL=${CPU_CHAT_Q4_MODEL:-}
-      - CPU_CHAT_Q4_BASE_URL=${CPU_CHAT_Q4_BASE_URL:-}
-      - PUBLIC_CPU_CHAT_Q4_MODEL=${PUBLIC_CPU_CHAT_Q4_MODEL:-}
-      - CPU_CHAT_Q4_MAX_CONTEXT_TOKENS=${CPU_CHAT_Q4_MAX_CONTEXT_TOKENS:-8192}
-      - CPU_CHAT_Q6_MODEL=${CPU_CHAT_Q6_MODEL:-}
-      - CPU_CHAT_Q6_BASE_URL=${CPU_CHAT_Q6_BASE_URL:-}
-      - PUBLIC_CPU_CHAT_Q6_MODEL=${PUBLIC_CPU_CHAT_Q6_MODEL:-}
-      - CPU_CHAT_Q6_MAX_CONTEXT_TOKENS=${CPU_CHAT_Q6_MAX_CONTEXT_TOKENS:-8192}
- #   depends_on:
- #    - vllm-gpu0
+      - MODEL_REGISTRY_ENABLED=${MODEL_REGISTRY_ENABLED:-0}
+      - MODEL_REGISTRY_ROUTING_ENABLED=${MODEL_REGISTRY_ROUTING_ENABLED:-1}
+      - MODEL_REGISTRY_SYNC_FROM_ENV=${MODEL_REGISTRY_SYNC_FROM_ENV:-0}
+      - MODEL_REGISTRY_DB_DSN=${MODEL_REGISTRY_DB_DSN:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       - "11434:11434"
 
 volumes:
-  hf-cache:
+  model-registry-pg:
