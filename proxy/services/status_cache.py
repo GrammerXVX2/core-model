@@ -5,30 +5,15 @@ from typing import Any, Dict, List, Union
 from fastapi import HTTPException
 
 from settings import (
-    CPU_CHAT_Q4_MAX_CONTEXT_TOKENS,
-    CPU_CHAT_Q4_MODEL,
-    CPU_CHAT_Q6_MAX_CONTEXT_TOKENS,
-    MINISTRAL_CHAT_MAX_CONTEXT_TOKENS,
+    DEFAULT_MAX_TOKENS,
+    MAX_TOKENS_CAP,
+    MIN_CONTEXT_HEADROOM,
     MODEL_STATUS_POLL_INTERVAL_ERROR_SECONDS,
     MODEL_STATUS_POLL_INTERVAL_SECONDS,
-    PUBLIC_MINISTRAL_CHAT_MODEL,
-    PUBLIC_QWEN_CHAT_MODEL,
-    PUBLIC_QWEN_EMBED_MODEL,
-    QWEN_CHAT_MAX_CONTEXT_TOKENS,
-    QWEN_CHAT_MODEL,
-    QWEN_EMBED_4B_MAX_CONTEXT_TOKENS,
-    QWEN_EMBED_4B_MODEL,
-    QWEN_EMBED_8B_MAX_CONTEXT_TOKENS,
-    QWEN_EMBED_8B_MODEL,
-    QWEN_EMBED_MAX_CONTEXT_TOKENS,
-    QWEN_EMBED_MODEL,
-    MINISTRAL_CHAT_MODEL,
-    MINISTRAL_CHAT_BASE_URL,
-    QWEN_CHAT_BASE_URL,
-    QWEN_EMBED_BASE_URL,
 )
 from services.metrics import set_model_availability
-from services.routing import _additional_chat_routes, _embed_routes, _normalize_model_name
+from services.model_registry import get_registry_checks as _get_registry_checks
+from services.routing import _normalize_model_name
 from services.upstream import get_http_client as _get_http_client
 
 
@@ -40,12 +25,36 @@ MODEL_STATUS_CACHE_LOCK = asyncio.Lock()
 MODEL_STATUS_POLLER_TASK: asyncio.Task | None = None
 
 
+def _warm_item_from_check(check: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "id": int(check.get("id") or 0),
+        "model": str(check.get("public_model") or ""),
+        "model_vllm": str(check.get("vllm_model") or ""),
+        "type": str(check.get("type") or ""),
+        "base_url": str(check.get("base_url") or "").rstrip("/"),
+        "max_context_tokens": int(check.get("max_context_tokens") or 0),
+        "default_max_tokens": int(check.get("default_max_tokens") or DEFAULT_MAX_TOKENS),
+        "max_tokens_cap": int(check.get("max_tokens_cap") or MAX_TOKENS_CAP),
+        "min_context_headroom": int(check.get("min_context_headroom") or MIN_CONTEXT_HEADROOM),
+        "stream_supported": bool(check.get("stream_supported", False)),
+        "reasoning_supported": bool(check.get("reasoning_supported", False)),
+        "status": "прогрев",
+        "detail": "model status poll in progress",
+    }
+
+
 async def _probe_model_status(
+    model_id: int,
     public_model: str,
     vllm_model: str,
     model_type: str,
     base_url: str,
     max_context_tokens: int,
+    default_max_tokens: int,
+    max_tokens_cap: int,
+    min_context_headroom: int,
+    stream_supported: bool,
+    reasoning_supported: bool,
 ) -> Dict[str, Union[str, int]]:
     url = f"{base_url.rstrip('/')}/models"
     try:
@@ -53,22 +62,34 @@ async def _probe_model_status(
         resp = await client.get(url)
     except Exception as exc:
         return {
+            "id": int(model_id),
             "model": public_model,
             "model_vllm": vllm_model,
             "type": model_type,
             "base_url": base_url,
             "max_context_tokens": max_context_tokens,
+            "default_max_tokens": default_max_tokens,
+            "max_tokens_cap": max_tokens_cap,
+            "min_context_headroom": min_context_headroom,
+            "stream_supported": stream_supported,
+            "reasoning_supported": reasoning_supported,
             "status": "недоступен",
             "detail": f"connection error: {str(exc)}",
         }
 
     if resp.status_code >= 400:
         return {
+            "id": int(model_id),
             "model": public_model,
             "model_vllm": vllm_model,
             "type": model_type,
             "base_url": base_url,
             "max_context_tokens": max_context_tokens,
+            "default_max_tokens": default_max_tokens,
+            "max_tokens_cap": max_tokens_cap,
+            "min_context_headroom": min_context_headroom,
+            "stream_supported": stream_supported,
+            "reasoning_supported": reasoning_supported,
             "status": "недоступен",
             "detail": f"http {resp.status_code}",
         }
@@ -77,11 +98,17 @@ async def _probe_model_status(
         data = resp.json()
     except Exception:
         return {
+            "id": int(model_id),
             "model": public_model,
             "model_vllm": vllm_model,
             "type": model_type,
             "base_url": base_url,
             "max_context_tokens": max_context_tokens,
+            "default_max_tokens": default_max_tokens,
+            "max_tokens_cap": max_tokens_cap,
+            "min_context_headroom": min_context_headroom,
+            "stream_supported": stream_supported,
+            "reasoning_supported": reasoning_supported,
             "status": "недоступен",
             "detail": "invalid json from /models",
         }
@@ -92,110 +119,67 @@ async def _probe_model_status(
     found = any(_normalize_model_name(mid) == target for mid in ids)
     if found:
         return {
+            "id": int(model_id),
             "model": public_model,
             "model_vllm": vllm_model,
             "type": model_type,
             "base_url": base_url,
             "max_context_tokens": max_context_tokens,
+            "default_max_tokens": default_max_tokens,
+            "max_tokens_cap": max_tokens_cap,
+            "min_context_headroom": min_context_headroom,
+            "stream_supported": stream_supported,
+            "reasoning_supported": reasoning_supported,
             "status": "доступен",
             "detail": "",
         }
 
     preview = ", ".join(ids[:5])
     return {
+        "id": int(model_id),
         "model": public_model,
         "model_vllm": vllm_model,
         "type": model_type,
         "base_url": base_url,
         "max_context_tokens": max_context_tokens,
+        "default_max_tokens": default_max_tokens,
+        "max_tokens_cap": max_tokens_cap,
+        "min_context_headroom": min_context_headroom,
+        "stream_supported": stream_supported,
+        "reasoning_supported": reasoning_supported,
         "status": "недоступен",
         "detail": f"model id not found in /models; seen: {preview}",
     }
 
 
-def _build_model_checks() -> List[Dict[str, Any]]:
-    checks = [
-        {
-            "public_model": PUBLIC_QWEN_CHAT_MODEL,
-            "vllm_model": QWEN_CHAT_MODEL,
-            "type": "chat",
-            "base_url": QWEN_CHAT_BASE_URL,
-            "max_context_tokens": QWEN_CHAT_MAX_CONTEXT_TOKENS,
-            "aliases": {PUBLIC_QWEN_CHAT_MODEL, QWEN_CHAT_MODEL},
-        },
-        {
-            "public_model": PUBLIC_QWEN_EMBED_MODEL,
-            "vllm_model": QWEN_EMBED_MODEL,
-            "type": "embeddings",
-            "base_url": QWEN_EMBED_BASE_URL,
-            "max_context_tokens": QWEN_EMBED_MAX_CONTEXT_TOKENS,
-            "aliases": {PUBLIC_QWEN_EMBED_MODEL, QWEN_EMBED_MODEL},
-        },
-        {
-            "public_model": PUBLIC_MINISTRAL_CHAT_MODEL,
-            "vllm_model": MINISTRAL_CHAT_MODEL,
-            "type": "chat",
-            "base_url": MINISTRAL_CHAT_BASE_URL,
-            "max_context_tokens": MINISTRAL_CHAT_MAX_CONTEXT_TOKENS,
-            "aliases": {PUBLIC_MINISTRAL_CHAT_MODEL, MINISTRAL_CHAT_MODEL},
-        },
-    ]
-    for route in _embed_routes()[1:]:
-        if route["vllm_model"] == QWEN_EMBED_8B_MODEL:
-            max_ctx = QWEN_EMBED_8B_MAX_CONTEXT_TOKENS
-        elif route["vllm_model"] == QWEN_EMBED_4B_MODEL:
-            max_ctx = QWEN_EMBED_4B_MAX_CONTEXT_TOKENS
-        else:
-            max_ctx = QWEN_EMBED_MAX_CONTEXT_TOKENS
-
-        checks.append(
-            {
-                "public_model": route["public_model"],
-                "vllm_model": route["vllm_model"],
-                "type": "embeddings",
-                "base_url": route["base_url"],
-                "max_context_tokens": max_ctx,
-                "aliases": {route["public_model"], route["vllm_model"]},
-            }
-        )
-    for route in _additional_chat_routes():
-        max_ctx = CPU_CHAT_Q4_MAX_CONTEXT_TOKENS if route["vllm_model"] == CPU_CHAT_Q4_MODEL else CPU_CHAT_Q6_MAX_CONTEXT_TOKENS
-        checks.append(
-            {
-                "public_model": route["public_model"],
-                "vllm_model": route["vllm_model"],
-                "type": "chat",
-                "base_url": route["base_url"],
-                "max_context_tokens": max_ctx,
-                "aliases": {route["public_model"], route["vllm_model"]},
-            }
-        )
-
-    deduped: Dict[tuple[str, str, str], Dict[str, Any]] = {}
-    for check in checks:
-        key = (
-            _normalize_model_name(str(check["vllm_model"])),
-            str(check["base_url"]).rstrip("/"),
-            str(check["type"]),
-        )
-        if key not in deduped:
-            deduped[key] = check
-            continue
-        deduped[key]["aliases"].update(check["aliases"])
-
-    return list(deduped.values())
+async def _build_model_checks() -> List[Dict[str, Any]]:
+    checks = await _get_registry_checks()
+    if checks:
+        return checks
+    return []
 
 
 async def refresh_model_status_cache() -> None:
-    checks = _build_model_checks()
+    checks = await _build_model_checks()
+    if not checks:
+        async with MODEL_STATUS_CACHE_LOCK:
+            MODEL_STATUS_CACHE.clear()
+            MODEL_STATUS_LIST_CACHE.clear()
+        return
     results = await asyncio.gather(
         *[
             _probe_model_status(
+                int(check.get("id") or 0),
                 str(check["public_model"]),
                 str(check["vllm_model"]),
                 str(check["type"]),
                 str(check["base_url"]),
                 int(check["max_context_tokens"]),
+                int(check.get("default_max_tokens") or DEFAULT_MAX_TOKENS),
+                int(check.get("max_tokens_cap") or MAX_TOKENS_CAP),
+                int(check.get("min_context_headroom") or MIN_CONTEXT_HEADROOM),
+                bool(check.get("stream_supported", False)),
+                bool(check.get("reasoning_supported", False)),
             )
             for check in checks
         ]
@@ -264,15 +248,87 @@ async def ensure_model_available(target: Dict[str, str]) -> None:
 
 
 async def get_models_snapshot() -> List[Dict[str, Any]]:
-    if not MODEL_STATUS_LIST_CACHE:
-        await refresh_model_status_cache()
     async with MODEL_STATUS_CACHE_LOCK:
-        return [dict(item) for item in MODEL_STATUS_LIST_CACHE]
+        cached = [dict(item) for item in MODEL_STATUS_LIST_CACHE]
+    if cached:
+        return cached
+
+    checks = await _build_model_checks()
+    if not checks:
+        return []
+    return [_warm_item_from_check(check) for check in checks]
+
+
+async def resolve_target_from_status_cache(requested_model: str | None, expected_type: str) -> Dict[str, Any] | None:
+    requested = (requested_model or "").strip()
+    if not requested:
+        return None
+
+    async with MODEL_STATUS_CACHE_LOCK:
+        status = MODEL_STATUS_CACHE.get(requested)
+
+    if status:
+        actual_type = str(status.get("type", ""))
+        public_model = str(status.get("model", requested))
+        if actual_type != expected_type:
+            endpoint = "chat" if expected_type == "chat" else "embeddings"
+            raise HTTPException(status_code=400, detail=f"model does not support {endpoint} endpoint: {public_model}")
+
+        return {
+            "public_model": public_model,
+            "vllm_model": str(status.get("model_vllm", public_model)),
+            "base_url": str(status.get("base_url", "")).rstrip("/"),
+            "type": actual_type,
+            "max_context_tokens": int(status.get("max_context_tokens") or 0),
+            "default_max_tokens": int(status.get("default_max_tokens") or DEFAULT_MAX_TOKENS),
+            "max_tokens_cap": int(status.get("max_tokens_cap") or MAX_TOKENS_CAP),
+            "min_context_headroom": int(status.get("min_context_headroom") or MIN_CONTEXT_HEADROOM),
+            "stream_supported": bool(status.get("stream_supported", False)),
+            "reasoning_supported": bool(status.get("reasoning_supported", False)),
+        }
+
+    checks = await _build_model_checks()
+    for check in checks:
+        aliases = {str(check.get("public_model") or ""), str(check.get("vllm_model") or "")}
+        aliases.update(str(a or "").strip() for a in (check.get("aliases") or set()))
+        if requested not in aliases:
+            continue
+
+        actual_type = str(check.get("type") or "")
+        public_model = str(check.get("public_model") or requested)
+        if actual_type != expected_type:
+            endpoint = "chat" if expected_type == "chat" else "embeddings"
+            raise HTTPException(status_code=400, detail=f"model does not support {endpoint} endpoint: {public_model}")
+
+        return {
+            "public_model": public_model,
+            "vllm_model": str(check.get("vllm_model") or public_model),
+            "base_url": str(check.get("base_url") or "").rstrip("/"),
+            "type": actual_type,
+            "max_context_tokens": int(check.get("max_context_tokens") or 0),
+            "default_max_tokens": int(check.get("default_max_tokens") or DEFAULT_MAX_TOKENS),
+            "max_tokens_cap": int(check.get("max_tokens_cap") or MAX_TOKENS_CAP),
+            "min_context_headroom": int(check.get("min_context_headroom") or MIN_CONTEXT_HEADROOM),
+            "stream_supported": bool(check.get("stream_supported", False)),
+            "reasoning_supported": bool(check.get("reasoning_supported", False)),
+        }
+
+    async with MODEL_STATUS_CACHE_LOCK:
+        all_items = [dict(item) for item in MODEL_STATUS_LIST_CACHE]
+    if not all_items:
+        if not checks:
+            raise HTTPException(status_code=503, detail="no models registered in model registry")
+        allowed = [str(item.get("public_model", "")) for item in checks if str(item.get("type", "")) == expected_type]
+        endpoint = "chat" if expected_type == "chat" else "embeddings"
+        raise HTTPException(status_code=400, detail=f"unsupported model for {endpoint}; allowed: {', '.join(allowed)}")
+
+    allowed = [str(item.get("model", "")) for item in all_items if str(item.get("type", "")) == expected_type]
+    endpoint = "chat" if expected_type == "chat" else "embeddings"
+    raise HTTPException(status_code=400, detail=f"unsupported model for {endpoint}; allowed: {', '.join(allowed)}")
 
 
 async def startup_status_poller() -> None:
     global MODEL_STATUS_POLLER_TASK
-    await refresh_model_status_cache()
     MODEL_STATUS_POLLER_TASK = asyncio.create_task(_model_status_poller())
 
 

@@ -26,6 +26,23 @@ MODEL_AVAILABILITY = Gauge(
     ["model", "type", "base_url"],
 )
 
+MODEL_REGISTRY_DB_UP = Gauge(
+    "proxy_model_registry_db_up",
+    "Model registry DB connectivity flag (1 connected, 0 fallback).",
+)
+
+MODEL_REGISTRY_SYNC_COUNTS = Gauge(
+    "proxy_model_registry_sync_counts",
+    "Last model registry sync counters by kind.",
+    ["kind"],
+)
+
+MODEL_REGISTRY_FALLBACK_TOTAL = Counter(
+    "proxy_model_registry_fallback_total",
+    "Model registry fallback count by reason.",
+    ["reason"],
+)
+
 
 def now_seconds() -> float:
     return time.perf_counter()
@@ -45,6 +62,30 @@ def inc_upstream_error(route: str, status: int) -> None:
 
 def set_model_availability(model: str, model_type: str, base_url: str, status: str) -> None:
     MODEL_AVAILABILITY.labels(model=model, type=model_type, base_url=base_url).set(1 if status == "доступен" else 0)
+
+
+def set_model_registry_db_up(is_up: bool) -> None:
+    MODEL_REGISTRY_DB_UP.set(1 if is_up else 0)
+
+
+def set_model_registry_sync_counts(
+    env_total: int,
+    db_total_before: int,
+    inserted: int,
+    updated: int,
+    unchanged: int,
+    removed: int,
+) -> None:
+    MODEL_REGISTRY_SYNC_COUNTS.labels(kind="env_total").set(max(0, env_total))
+    MODEL_REGISTRY_SYNC_COUNTS.labels(kind="db_total_before").set(max(0, db_total_before))
+    MODEL_REGISTRY_SYNC_COUNTS.labels(kind="inserted").set(max(0, inserted))
+    MODEL_REGISTRY_SYNC_COUNTS.labels(kind="updated").set(max(0, updated))
+    MODEL_REGISTRY_SYNC_COUNTS.labels(kind="unchanged").set(max(0, unchanged))
+    MODEL_REGISTRY_SYNC_COUNTS.labels(kind="removed").set(max(0, removed))
+
+
+def inc_model_registry_fallback(reason: str) -> None:
+    MODEL_REGISTRY_FALLBACK_TOTAL.labels(reason=reason or "unknown").inc()
 
 
 def export_metrics() -> tuple[bytes, str]:

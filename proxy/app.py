@@ -7,6 +7,10 @@ from api.chat import router as chat_router
 from api.embeddings import router as embeddings_router
 from api.models import router as models_router
 from services.metrics import export_metrics, now_seconds, observe_request_latency
+from services.model_registry import (
+    shutdown_model_registry as _shutdown_model_registry,
+    startup_model_registry as _startup_model_registry,
+)
 from services.status_cache import (
     shutdown_status_poller as _status_shutdown_poller,
     startup_status_poller as _status_startup_poller,
@@ -60,10 +64,12 @@ async def metrics() -> Response:
 @app.on_event("startup")
 async def _startup_model_poller() -> None:
     await _startup_http_client()
+    await _startup_model_registry()
     await _status_startup_poller()
 
 
 @app.on_event("shutdown")
 async def _shutdown_model_poller() -> None:
     await _status_shutdown_poller()
+    await _shutdown_model_registry()
     await _shutdown_http_client()

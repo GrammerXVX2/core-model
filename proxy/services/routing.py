@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException
 
@@ -7,8 +7,11 @@ from settings import (
     CPU_CHAT_Q4_MODEL,
     CPU_CHAT_Q6_BASE_URL,
     CPU_CHAT_Q6_MODEL,
+    QWEN_122B_CHAT_BASE_URL,
+    QWEN_122B_CHAT_MODEL,
     MINISTRAL_CHAT_BASE_URL,
     MINISTRAL_CHAT_MODEL,
+    PUBLIC_QWEN_122B_CHAT_MODEL,
     PUBLIC_CPU_CHAT_Q4_MODEL,
     PUBLIC_CPU_CHAT_Q6_MODEL,
     PUBLIC_MINISTRAL_CHAT_MODEL,
@@ -58,8 +61,17 @@ def _resolve_default_chat_route() -> Dict[str, str]:
     }
 
 
-def _additional_chat_routes() -> List[Dict[str, str]]:
-    routes: List[Dict[str, str]] = []
+def _additional_chat_routes() -> List[Dict[str, Any]]:
+    routes: List[Dict[str, Any]] = []
+    if QWEN_122B_CHAT_MODEL and QWEN_122B_CHAT_BASE_URL and PUBLIC_QWEN_122B_CHAT_MODEL:
+        routes.append(
+            {
+                "public_model": PUBLIC_QWEN_122B_CHAT_MODEL,
+                "vllm_model": QWEN_122B_CHAT_MODEL,
+                "base_url": QWEN_122B_CHAT_BASE_URL,
+                "type": "chat",
+            }
+        )
     if CPU_CHAT_Q4_MODEL and CPU_CHAT_Q4_BASE_URL and PUBLIC_CPU_CHAT_Q4_MODEL:
         routes.append(
             {
