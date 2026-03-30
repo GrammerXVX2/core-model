@@ -40,11 +40,11 @@ Model Registry Source of Truth
 - Optional bulk seed from JSON checks file:
   - `python3 scripts/seed_model_registry.py --checks-file ./checks.json`
 - Quick register/update single model (no env edits required):
-   - `python3 scripts/register_model.py --public-model Qwen3.5-122B-A10B-FP8 --backend-model qwen3 --base-url http://10.77.163.200:8000/v1 --type chat --max-context 131072 --default-max 131072 --max-cap 131072 --headroom 256 --stream-supported --no-reasoning-supported`
+   - `python3 scripts/register_model.py --public-model Qwen3.5-122B-A10B-FP8 --backend-model qwen35-122b-a10b-fp8 --base-url http://10.77.163.200:8000/v1 --type chat --max-context 131072 --default-max 4096 --max-cap 8192 --headroom 256 --stream-supported --reasoning-supported`
 - API register/update endpoint:
    - `POST /api/models/register`
    - Example body:
-     `{"public_model":"Qwen3.5-122B-A10B-FP8","vllm_model":"qwen3","model_type":"chat","base_url":"http://10.77.163.200:8000/v1","max_context_tokens":131072,"default_max_tokens":131072,"max_tokens_cap":131072,"min_context_headroom":256,"stream_supported":true,"reasoning_supported":false,"aliases":["Qwen3.5-122B-A10B-FP8","qwen3"]}`
+   `{"public_model":"Qwen3.5-122B-A10B-FP8","vllm_model":"qwen35-122b-a10b-fp8","model_type":"chat","base_url":"http://10.77.163.200:8000/v1","max_context_tokens":131072,"default_max_tokens":4096,"max_tokens_cap":8192,"min_context_headroom":256,"stream_supported":true,"reasoning_supported":true,"aliases":["Qwen3.5-122B-A10B-FP8","qwen35-122b-a10b-fp8"]}`
 - Full CRUD (ID-based):
    - `POST /api/models` create model (no `id` in body; generated automatically)
    - `GET /api/models/{id}` get model by id

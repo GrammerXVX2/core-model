@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 from fastapi import APIRouter, HTTPException
+from constants import MODEL_STATUS_AVAILABLE
 
 from schemas import (
     ModelRegistryCrudPayload,
@@ -81,7 +82,13 @@ def _to_ollama_tag_item(item: Dict[str, Any]) -> Dict[str, Any]:
     model_name = public_model or backend_model
     family = _guess_family(backend_model or model_name)
     quantization = _extract_quantization_level(backend_model or model_name)
-    fmt = "gguf" if quantization else "unknown"
+    modality = str(item.get("modality") or "llm")
+    vision_supported = bool(item.get("vision_supported", False))
+    is_gguf = bool(quantization)
+    if modality == "vl":
+        fmt = "vl"
+    else:
+        fmt = "gguf" if is_gguf else "vllm"
     digest = _stable_digest(f"{model_name}|{backend_model}|{model_type}")
 
     return {
@@ -96,7 +103,9 @@ def _to_ollama_tag_item(item: Dict[str, Any]) -> Dict[str, Any]:
             "family": family,
             "families": [family] if family != "unknown" else [],
             "parameter_size": _guess_parameter_size(backend_model or model_name),
-            "quantization_level": quantization,
+            "quantization_level": quantization if is_gguf else "",
+            "modality": modality,
+            "vision_supported": vision_supported,
         },
     }
 
@@ -132,7 +141,7 @@ async def api_tags() -> Dict[str, List[Dict[str, Any]]]:
     available = [
         item
         for item in snapshot
-        if str(item.get("status", "")).lower() == "доступен"
+        if str(item.get("status", "")).lower() == MODEL_STATUS_AVAILABLE
         and str(item.get("type", "")) in {"chat", "embeddings"}
     ]
 

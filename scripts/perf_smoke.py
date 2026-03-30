@@ -235,14 +235,14 @@ def _run_capability_checks(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Lightweight perf smoke for proxy chat/embed endpoints.")
     parser.add_argument("--base-url", default="http://127.0.0.1:11434", help="Proxy base URL")
-    parser.add_argument("--chat-model", default="Qwen3.5-9B", help="Public chat model")
-    parser.add_argument("--embed-model", default="Qwen3-Embedding-8B", help="Public embeddings model")
+    parser.add_argument("--chat-model", default="Qwen3.5-122B-A10B-FP8", help="Public chat model")
+    parser.add_argument("--embed-model", default="qwen-embed-4b-tei", help="Public embeddings model")
     parser.add_argument("--burst-requests", type=int, default=20, help="Requests in burst profile")
     parser.add_argument("--mixed-requests", type=int, default=20, help="Requests in mixed profile")
     parser.add_argument("--concurrency", type=int, default=5, help="Worker count for concurrent profiles")
     parser.add_argument(
         "--non-llama-chat-model",
-        default="Qwen3.5-9B",
+        default="Qwen3.5-122B-A10B-FP8",
         help="Chat model expected to reject reasoning toggle (used in capability checks)",
     )
     parser.add_argument(

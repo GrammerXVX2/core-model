@@ -1,9 +1,17 @@
 import json
 import logging
 import os
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from fastapi import APIRouter, HTTPException, Request
+from constants import (
+    EMBEDDING_PATH_CANDIDATES,
+    ERR_NO_EMBEDDING_MODELS,
+    LOG_EMBED_ADAPTED,
+    LOG_EMBED_INCOMING,
+    LOG_EMBED_VLLM_ERROR,
+    LOG_EMBED_VLLM_RESPONSE,
+)
 
 from api.common import ns, safe_preview
 from schemas import EmbedResponseModel
@@ -16,13 +24,62 @@ from services.upstream import post_json_to as _post_json_to
 logger = logging.getLogger("uvicorn.error")
 router = APIRouter(tags=["embeddings"])
 
+
+async def _post_embeddings_with_fallback(base_url: str, model_id: str, input_data: Any) -> Dict[str, Any]:
+    attempts = [
+        (EMBEDDING_PATH_CANDIDATES[0], {"model": model_id, "input": input_data}),
+        (EMBEDDING_PATH_CANDIDATES[2], {"model": model_id, "input": input_data}),
+        (EMBEDDING_PATH_CANDIDATES[1], {"inputs": input_data}),
+        (EMBEDDING_PATH_CANDIDATES[3], {"inputs": input_data}),
+    ]
+
+    last_exc: HTTPException | None = None
+    for path, payload in attempts:
+        try:
+            data = await _post_json_to(base_url, path, payload)
+            if isinstance(data, dict):
+                return data
+        except HTTPException as exc:
+            last_exc = exc
+            if exc.status_code in (404, 405, 422):
+                continue
+            raise
+
+    if last_exc is not None:
+        raise last_exc
+    raise HTTPException(status_code=502, detail="embedding upstream is unavailable")
+
+
+def _extract_embeddings(data: Dict[str, Any]) -> List[List[float]]:
+    # OpenAI-style response.
+    if isinstance(data.get("data"), list):
+        return [item.get("embedding", []) for item in data.get("data", []) if isinstance(item, dict)]
+
+    # TEI native response can return `embeddings` or a single vector list.
+    if isinstance(data.get("embeddings"), list):
+        emb = data.get("embeddings")
+        if emb and isinstance(emb[0], list):
+            return emb
+    if isinstance(data.get("embedding"), list):
+        emb = data.get("embedding")
+        if emb and isinstance(emb[0], (int, float)):
+            return [emb]
+
+    # Some TEI deployments return raw vector (single input).
+    if isinstance(data, list) and data and isinstance(data[0], (int, float)):
+        return [data]
+    if isinstance(data, list) and data and isinstance(data[0], list):
+        return data
+
+    return []
+
 EMBED_OPENAPI_EXTRA = {
     "requestBody": {
         "required": True,
         "content": {
             "application/json": {
                 "example": {
-                    "model": os.getenv("OPENAPI_EMBED_EXAMPLE_MODEL", "Qwen3-Embedding-8B"),
+                    "model": os.getenv("OPENAPI_EMBED_EXAMPLE_MODEL", "qwen-embed-4b-tei"),
                     "input": json.loads(
                         os.getenv(
                             "OPENAPI_EMBED_EXAMPLE_INPUT_JSON",
@@ -46,12 +103,12 @@ EMBED_OPENAPI_EXTRA = {
 async def api_embed(request: Request) -> Dict[str, Any]:
     body_data = await _read_request_body_as_dict(request)
     if EMBED_DEBUG_LOG:
-        logger.info("embed.incoming body=%s", safe_preview(body_data))
+        logger.info(LOG_EMBED_INCOMING, safe_preview(body_data))
 
     requested_model = body_data.get("model")
     target = await _resolve_target_from_status_cache(requested_model, expected_type="embeddings")
     if target is None:
-        raise HTTPException(status_code=503, detail="no embedding models registered in status cache")
+        raise HTTPException(status_code=503, detail=ERR_NO_EMBEDDING_MODELS)
     await _ensure_model_available(target)
     model = requested_model or target["public_model"]
     input_data = body_data.get("input")
@@ -75,14 +132,9 @@ async def api_embed(request: Request) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="input is required")
 
     start_ns = ns()
-    payload = {
-        "model": target["vllm_model"],
-        "input": input_data,
-    }
-
     if EMBED_DEBUG_LOG:
         logger.info(
-            "embed.adapted model=%s route_model=%s base_url=%s input_type=%s input_preview=%s",
+            LOG_EMBED_ADAPTED,
             model,
             target["vllm_model"],
             target["base_url"],
@@ -91,22 +143,22 @@ async def api_embed(request: Request) -> Dict[str, Any]:
         )
 
     try:
-        data = await _post_json_to(target["base_url"], "/embeddings", payload)
+        data = await _post_embeddings_with_fallback(target["base_url"], target["vllm_model"], input_data)
     except HTTPException as exc:
         if EMBED_DEBUG_LOG:
             logger.error(
-                "embed.vllm_error status=%s detail=%s",
+                LOG_EMBED_VLLM_ERROR,
                 exc.status_code,
                 safe_preview(exc.detail),
             )
         raise
 
-    embeddings = [item.get("embedding", []) for item in data.get("data", [])]
+    embeddings = _extract_embeddings(data)
     usage = data.get("usage") or {}
 
     if EMBED_DEBUG_LOG:
         logger.info(
-            "embed.vllm_response vectors=%s first_dim=%s prompt_tokens=%s",
+            LOG_EMBED_VLLM_RESPONSE,
             len(embeddings),
             len(embeddings[0]) if embeddings else 0,
             usage.get("prompt_tokens", 0),
@@ -132,20 +184,16 @@ async def api_dev_embeddings_info(request: Request) -> Dict[str, Any]:
     requested_model = body_data.get("model")
     target = await _resolve_target_from_status_cache(requested_model, expected_type="embeddings")
     if target is None:
-        raise HTTPException(status_code=503, detail="no embedding models registered in status cache")
+        raise HTTPException(status_code=503, detail=ERR_NO_EMBEDDING_MODELS)
     await _ensure_model_available(target)
 
     probe_input = body_data.get("input")
     if probe_input is None:
         probe_input = "test"
 
-    payload = {
-        "model": target["vllm_model"],
-        "input": probe_input,
-    }
-    data = await _post_json_to(target["base_url"], "/embeddings", payload)
+    data = await _post_embeddings_with_fallback(target["base_url"], target["vllm_model"], probe_input)
 
-    vectors = [item.get("embedding", []) for item in data.get("data", [])]
+    vectors = _extract_embeddings(data)
     vector_size = len(vectors[0]) if vectors else 0
 
     return {

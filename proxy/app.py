@@ -24,14 +24,28 @@ app = FastAPI(
     title="Ollama-Compatible Proxy for vLLM",
     description=(
         "Proxy layer that exposes Ollama-style endpoints and forwards requests "
-        "to vLLM OpenAI-compatible APIs."
+        "to vLLM/TEI OpenAI-compatible APIs. "
+        "Model routing is DB-first via model_registry_checks; use /api/models CRUD "
+        "to add, update, disable, and tune models without redeploy."
     ),
     version="1.0.0",
     openapi_tags=[
-        {"name": "chat", "description": "Chat-style text generation."},
-        {"name": "generate", "description": "Prompt-style text generation."},
-        {"name": "embeddings", "description": "Text embedding endpoints."},
-        {"name": "models", "description": "Model registry and availability status."},
+        {
+            "name": "chat",
+            "description": "Chat completion endpoints. Supports Ollama-style messages and optional images for VL models.",
+        },
+        {
+            "name": "generate",
+            "description": "Prompt-style text generation endpoint (/api/generate).",
+        },
+        {
+            "name": "embeddings",
+            "description": "Embedding endpoints with OpenAI- and TEI-compatible upstream fallback.",
+        },
+        {
+            "name": "models",
+            "description": "Model registry CRUD and runtime availability snapshot. Includes modality and vision support markers.",
+        },
     ],
 )
 

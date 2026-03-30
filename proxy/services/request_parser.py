@@ -4,6 +4,15 @@ from typing import Any, Dict
 from urllib.parse import parse_qs
 
 from fastapi import Request
+from constants import (
+    LOG_REQ_PARSE_EMPTY_DICT,
+    LOG_REQ_PARSE_FORM_ERROR,
+    LOG_REQ_PARSE_JSON_ERROR,
+    LOG_REQ_PARSE_KEYS,
+    LOG_REQ_PARSE_MULTIPART_ERROR,
+    LOG_REQ_PARSE_RAW_PREVIEW,
+    LOG_REQ_PARSE_START,
+)
 
 from settings import LOG_TEXT_PREVIEW_CHARS, REQUEST_DEBUG_LOG
 
@@ -43,7 +52,7 @@ async def read_request_body_as_dict(request: Request) -> Dict[str, Any]:
 
     if REQUEST_DEBUG_LOG:
         logger.info(
-            "req.parse.start path=%s content_type=%s content_length=%s",
+            LOG_REQ_PARSE_START,
             request.url.path,
             content_type,
             content_length,
@@ -54,7 +63,7 @@ async def read_request_body_as_dict(request: Request) -> Dict[str, Any]:
             parsed = await request.json()
         except Exception as exc:
             if REQUEST_DEBUG_LOG:
-                logger.warning("req.parse.json_error path=%s error=%s", request.url.path, str(exc))
+                logger.warning(LOG_REQ_PARSE_JSON_ERROR, request.url.path, str(exc))
             parsed = {}
     elif "application/x-www-form-urlencoded" in content_type:
         try:
@@ -115,7 +124,7 @@ async def read_request_body_as_dict(request: Request) -> Dict[str, Any]:
                         pass
         except Exception as exc:
             if REQUEST_DEBUG_LOG:
-                logger.warning("req.parse.form_urlencoded_error path=%s error=%s", request.url.path, str(exc))
+                logger.warning(LOG_REQ_PARSE_FORM_ERROR, request.url.path, str(exc))
             parsed = {}
     elif "multipart/form-data" in content_type:
         try:
@@ -123,13 +132,13 @@ async def read_request_body_as_dict(request: Request) -> Dict[str, Any]:
             parsed = dict(form)
         except Exception as exc:
             if REQUEST_DEBUG_LOG:
-                logger.warning("req.parse.multipart_error path=%s error=%s", request.url.path, str(exc))
+                logger.warning(LOG_REQ_PARSE_MULTIPART_ERROR, request.url.path, str(exc))
             parsed = {}
     else:
         raw_bytes = await request.body()
         raw = raw_bytes.decode("utf-8", errors="ignore").strip()
         if REQUEST_DEBUG_LOG:
-            logger.info("req.parse.raw_preview path=%s raw=%s", request.url.path, _safe_preview(raw))
+            logger.info(LOG_REQ_PARSE_RAW_PREVIEW, request.url.path, _safe_preview(raw))
         if not raw:
             return {}
         try:
@@ -139,9 +148,9 @@ async def read_request_body_as_dict(request: Request) -> Dict[str, Any]:
 
     if isinstance(parsed, dict):
         if REQUEST_DEBUG_LOG and parsed:
-            logger.info("req.parse.keys path=%s keys=%s", request.url.path, list(parsed.keys())[:20])
+            logger.info(LOG_REQ_PARSE_KEYS, request.url.path, list(parsed.keys())[:20])
         if REQUEST_DEBUG_LOG and not parsed:
-            logger.warning("req.parse.empty_dict path=%s", request.url.path)
+            logger.warning(LOG_REQ_PARSE_EMPTY_DICT, request.url.path)
         return parsed
     if isinstance(parsed, str):
         return {"prompt": parsed, "input": parsed}

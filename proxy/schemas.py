@@ -77,13 +77,15 @@ class EmbedResponseModel(BaseModel):
 
 class ModelStatusItem(BaseModel):
     id: int = 0
-    model: str
-    model_vllm: str
-    type: str
-    base_url: str
-    max_context_tokens: int
-    status: str
-    detail: str = ""
+    model: str = Field(description="Public model alias exposed by proxy.")
+    model_vllm: str = Field(description="Upstream backend model id.")
+    type: str = Field(description="Endpoint type: chat or embeddings.")
+    modality: str = Field(default="llm", description="Model modality marker: llm or vl.")
+    vision_supported: bool = Field(default=False, description="Whether model accepts image input in chat messages.")
+    base_url: str = Field(description="Upstream base URL used for routing.")
+    max_context_tokens: int = Field(description="Configured model context window.")
+    status: str = Field(description="Availability status from periodic health checks.")
+    detail: str = Field(default="", description="Diagnostic detail for unavailable/probing states.")
 
 
 class ModelRegistryUpsertRequest(BaseModel):
@@ -91,7 +93,7 @@ class ModelRegistryUpsertRequest(BaseModel):
 
     public_model: str = Field(description="Public model alias exposed by proxy.")
     vllm_model: str = Field(description="Upstream backend model id.")
-    model_type: Literal["chat", "embeddings", "reranker"] = Field(description="Endpoint type for this model.")
+    model_type: Literal["chat", "embeddings"] = Field(description="Endpoint type for this model.")
     base_url: str = Field(description="Upstream base URL, for example http://10.77.163.200:8000/v1")
     max_context_tokens: int = Field(ge=1, description="Maximum context window for this model.")
     default_max_tokens: int = Field(ge=1, description="Default max output tokens.")
@@ -113,7 +115,7 @@ class ModelRegistryCrudPayload(BaseModel):
 
     public_model: str
     vllm_model: str
-    model_type: Literal["chat", "embeddings", "reranker"]
+    model_type: Literal["chat", "embeddings"]
     base_url: str
     max_context_tokens: int = Field(ge=1)
     default_max_tokens: int = Field(ge=1)
@@ -128,7 +130,7 @@ class ModelRegistryItem(BaseModel):
     id: int
     public_model: str
     vllm_model: str
-    model_type: Literal["chat", "embeddings", "reranker"]
+    model_type: Literal["chat", "embeddings"]
     base_url: str
     max_context_tokens: int
     default_max_tokens: int

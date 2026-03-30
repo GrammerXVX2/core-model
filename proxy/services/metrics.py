@@ -1,6 +1,7 @@
 import time
 
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
+from constants import MODEL_STATUS_AVAILABLE
 
 REQUEST_LATENCY_SECONDS = Histogram(
     "proxy_http_request_duration_seconds",
@@ -61,7 +62,7 @@ def inc_upstream_error(route: str, status: int) -> None:
 
 
 def set_model_availability(model: str, model_type: str, base_url: str, status: str) -> None:
-    MODEL_AVAILABILITY.labels(model=model, type=model_type, base_url=base_url).set(1 if status == "доступен" else 0)
+    MODEL_AVAILABILITY.labels(model=model, type=model_type, base_url=base_url).set(1 if status == MODEL_STATUS_AVAILABLE else 0)
 
 
 def set_model_registry_db_up(is_up: bool) -> None:

@@ -6,6 +6,17 @@ from typing import Any, Dict, List
 import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
+from constants import (
+    ERR_MODEL_DOES_NOT_SUPPORT_REASONING_FMT,
+    ERR_MODEL_DOES_NOT_SUPPORT_STREAM_FMT,
+    ERR_MODEL_DOES_NOT_SUPPORT_VISION_FMT,
+    ERR_NO_CHAT_MODELS,
+    LOG_CHAT_ADAPTED,
+    LOG_CHAT_INCOMING,
+    LOG_CHAT_UI_ADAPTED,
+    LOG_CHAT_VLLM_RESPONSE,
+    OPENAI_CHAT_COMPLETIONS_PATH,
+)
 
 from schemas import OllamaTextResponseModel
 from settings import (
@@ -32,11 +43,76 @@ from api.common import (
     ollama_response,
     safe_preview,
     sse_event,
+    strip_reasoning_artifacts,
     strip_reasoning_prefix,
 )
 
 logger = logging.getLogger("uvicorn.error")
 router = APIRouter()
+
+
+def _normalize_image_ref(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    lower = raw.lower()
+    if lower.startswith("http://") or lower.startswith("https://") or lower.startswith("data:image/"):
+        return raw
+    return f"data:image/jpeg;base64,{raw}"
+
+
+def _message_images(message: Dict[str, Any]) -> List[str]:
+    images = message.get("images")
+    if not isinstance(images, list):
+        return []
+    out: List[str] = []
+    for item in images:
+        normalized = _normalize_image_ref(item)
+        if normalized:
+            out.append(normalized)
+    return out
+
+
+def _messages_have_images(messages: List[Dict[str, Any]]) -> bool:
+    return any(bool(_message_images(msg)) for msg in messages)
+
+
+def _vision_supported(target: Dict[str, Any]) -> bool:
+    return bool(target.get("vision_supported", False))
+
+
+def _to_multimodal_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for msg in messages:
+        role = str(msg.get("role") or "user")
+        content = msg.get("content")
+        images = _message_images(msg)
+
+        if not images:
+            out.append(msg)
+            continue
+
+        blocks: List[Dict[str, Any]] = []
+        if isinstance(content, list):
+            for item in content:
+                if isinstance(item, dict):
+                    blocks.append(item)
+                elif item is not None:
+                    blocks.append({"type": "text", "text": str(item)})
+        else:
+            text = str(content) if content is not None else ""
+            if text:
+                blocks.append({"type": "text", "text": text})
+
+        for image_ref in images:
+            blocks.append({"type": "image_url", "image_url": {"url": image_ref}})
+
+        rewritten = dict(msg)
+        rewritten.pop("images", None)
+        rewritten["role"] = role
+        rewritten["content"] = blocks
+        out.append(rewritten)
+    return out
 
 
 def _coerce_bool(value: Any) -> Any:
@@ -122,11 +198,40 @@ CHAT_OPENAPI_EXTRA = {
         "required": True,
         "content": {
             "application/json": {
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "model": {"type": "string", "description": "Model alias from /api/models."},
+                        "messages": {
+                            "type": "array",
+                            "description": "Ollama-style chat messages. For VL models you can pass message.images.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "role": {"type": "string", "example": "user"},
+                                    "content": {
+                                        "oneOf": [{"type": "string"}, {"type": "array"}, {"type": "object"}],
+                                        "description": "Text or multimodal content blocks.",
+                                    },
+                                    "images": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                        "description": "Optional image URLs or base64 strings (Ollama-style). Only VL models support this.",
+                                    },
+                                },
+                                "required": ["role"],
+                            },
+                        },
+                        "temperature": {"type": "number", "default": 0.7},
+                        "max_tokens": {"type": "integer", "minimum": 1},
+                        "stream": {"type": "boolean", "description": "Use /api/chat-ui for streaming."},
+                    },
+                },
                 "examples": {
                     "qwen_chat": {
                         "summary": "Qwen chat route",
                         "value": {
-                            "model": os.getenv("OPENAPI_CHAT_EXAMPLE_MODEL", "Qwen3.5-9B"),
+                            "model": os.getenv("OPENAPI_CHAT_EXAMPLE_MODEL", "Qwen3.5-122B-A10B-FP8"),
                             "temperature": 0,
                             "messages": [
                                 {
@@ -139,12 +244,28 @@ CHAT_OPENAPI_EXTRA = {
                             ],
                         },
                     },
-                    "ministral_chat": {
-                        "summary": "Ministral chat route",
+                    "vl_chat_with_images": {
+                        "summary": "VL chat with Ollama-style images",
+                        "value": {
+                            "model": "Qwen3.5-122B-A10B-FP8",
+                            "temperature": 0,
+                            "messages": [
+                                {
+                                    "role": "user",
+                                    "content": "Опиши картинку одним предложением.",
+                                    "images": [
+                                        "https://images.unsplash.com/photo-1518717758536-85ae29035b6d?w=640"
+                                    ],
+                                }
+                            ],
+                        },
+                    },
+                    "alt_chat": {
+                        "summary": "Alternative chat route",
                         "value": {
                             "model": os.getenv(
-                                "OPENAPI_MINISTRAL_CHAT_EXAMPLE_MODEL",
-                                "Ministral3-14B",
+                                "OPENAPI_ALT_CHAT_EXAMPLE_MODEL",
+                                "Qwen3.5-122B-A10B-FP8",
                             ),
                             "temperature": 0.2,
                             "messages": [
@@ -170,7 +291,7 @@ GENERATE_OPENAPI_EXTRA = {
                     "qwen_generate": {
                         "summary": "Qwen generate route",
                         "value": {
-                            "model": os.getenv("OPENAPI_GENERATE_EXAMPLE_MODEL", "Qwen3.5-9B"),
+                            "model": os.getenv("OPENAPI_GENERATE_EXAMPLE_MODEL", "Qwen3.5-122B-A10B-FP8"),
                             "prompt": os.getenv(
                                 "OPENAPI_GENERATE_EXAMPLE_PROMPT",
                                 "Кратко объясни, как работает OAuth2 в FastAPI.",
@@ -178,12 +299,12 @@ GENERATE_OPENAPI_EXTRA = {
                             "temperature": 0,
                         },
                     },
-                    "ministral_generate": {
-                        "summary": "Ministral generate route",
+                    "alt_generate": {
+                        "summary": "Alternative generate route",
                         "value": {
                             "model": os.getenv(
-                                "OPENAPI_MINISTRAL_GENERATE_EXAMPLE_MODEL",
-                                "Ministral3-14B",
+                                "OPENAPI_ALT_GENERATE_EXAMPLE_MODEL",
+                                "Qwen3.5-122B-A10B-FP8",
                             ),
                             "prompt": "Сформулируй краткое определение понятия сервитута.",
                             "temperature": 0.2,
@@ -201,11 +322,37 @@ CHAT_UI_OPENAPI_EXTRA = {
         "required": True,
         "content": {
             "application/json": {
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "model": {"type": "string"},
+                        "messages": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "role": {"type": "string"},
+                                    "content": {"oneOf": [{"type": "string"}, {"type": "array"}, {"type": "object"}]},
+                                    "images": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                        "description": "Ollama-style images (VL models only).",
+                                    },
+                                },
+                                "required": ["role"],
+                            },
+                        },
+                        "stream": {"type": "boolean", "default": True},
+                        "reasoning": {"type": "boolean", "description": "Reasoning toggle for models with reasoning_supported=true."},
+                        "temperature": {"type": "number", "default": 0.7},
+                        "max_tokens": {"type": "integer", "minimum": 1},
+                    },
+                },
                 "examples": {
                     "ui_stream": {
                         "summary": "UI stream mode",
                         "value": {
-                            "model": os.getenv("OPENAPI_CHAT_UI_EXAMPLE_MODEL", "Qwen3.5-9B"),
+                            "model": os.getenv("OPENAPI_CHAT_UI_EXAMPLE_MODEL", "Qwen3.5-122B-A10B-FP8"),
                             "stream": True,
                             "reasoning": False,
                             "temperature": 0,
@@ -217,10 +364,27 @@ CHAT_UI_OPENAPI_EXTRA = {
                             ],
                         },
                     },
+                    "ui_stream_vl_images": {
+                        "summary": "UI stream with image input",
+                        "value": {
+                            "model": "Qwen3.5-122B-A10B-FP8",
+                            "stream": True,
+                            "reasoning": True,
+                            "messages": [
+                                {
+                                    "role": "user",
+                                    "content": "Что изображено на фото?",
+                                    "images": [
+                                        "https://images.unsplash.com/photo-1518717758536-85ae29035b6d?w=640"
+                                    ],
+                                }
+                            ],
+                        },
+                    },
                     "ui_non_stream": {
                         "summary": "UI non-stream mode",
                         "value": {
-                            "model": os.getenv("OPENAPI_CHAT_UI_EXAMPLE_MODEL", "Qwen3.5-9B"),
+                            "model": os.getenv("OPENAPI_CHAT_UI_EXAMPLE_MODEL", "Qwen3.5-122B-A10B-FP8"),
                             "stream": False,
                             "reasoning": True,
                             "max_tokens": 128,
@@ -243,7 +407,7 @@ CHAT_UI_OPENAPI_EXTRA = {
                 "text/event-stream": {
                     "schema": {
                         "type": "string",
-                        "example": "data: {\"type\": \"start\", \"model\": \"Qwen3.5-9B\"}\\n\\ndata: [DONE]\\n\\n",
+                        "example": "data: {\"type\": \"start\", \"model\": \"Qwen3.5-122B-A10B-FP8\"}\\n\\ndata: [DONE]\\n\\n",
                     }
                 },
                 "application/json": {
@@ -265,12 +429,12 @@ CHAT_UI_OPENAPI_EXTRA = {
 async def api_chat(request: Request) -> Any:
     body_data = await _read_request_body_as_dict(request)
     if CHAT_DEBUG_LOG:
-        logger.info("chat.incoming body=%s", safe_preview(body_data))
+        logger.info(LOG_CHAT_INCOMING, safe_preview(body_data))
 
     requested_model = body_data.get("model")
     target = await _resolve_target_from_status_cache(requested_model, expected_type="chat")
     if target is None:
-        raise HTTPException(status_code=503, detail="no chat models registered in status cache")
+        raise HTTPException(status_code=503, detail=ERR_NO_CHAT_MODELS)
     model = requested_model or target["public_model"]
     messages: List[Dict[str, Any]] = body_data.get("messages", [])
 
@@ -291,6 +455,13 @@ async def api_chat(request: Request) -> Any:
 
     if not messages:
         messages = [{"role": "user", "content": CHAT_EMPTY_FALLBACK_USER_TEXT}]
+
+    has_images = _messages_have_images(messages)
+    if has_images and not _vision_supported(target):
+        raise HTTPException(status_code=400, detail=ERR_MODEL_DOES_NOT_SUPPORT_VISION_FMT.format(model=model))
+    if has_images:
+        messages = _to_multimodal_messages(messages)
+
     messages = inject_system_language_prompt(messages)
     stream = bool(body_data.get("stream", False))
     if stream:
@@ -322,7 +493,7 @@ async def api_chat(request: Request) -> Any:
     if CHAT_DEBUG_LOG:
         roles = [str(m.get("role", "")) for m in messages[:10]]
         logger.info(
-            "chat.adapted model=%s route_model=%s base_url=%s messages=%s roles=%s est_input_tokens=%s max_tokens=%s",
+            LOG_CHAT_ADAPTED,
             model,
             target["vllm_model"],
             target["base_url"],
@@ -332,13 +503,13 @@ async def api_chat(request: Request) -> Any:
             resolved_max_tokens,
         )
 
-    data = await _post_json_to(target["base_url"], "/chat/completions", payload)
+    data = await _post_json_to(target["base_url"], OPENAI_CHAT_COMPLETIONS_PATH, payload)
 
     if CHAT_DEBUG_LOG:
         choice = (data.get("choices") or [{}])[0]
         message = choice.get("message") or {}
         logger.info(
-            "chat.vllm_response finish_reason=%s content_preview=%s reasoning_preview=%s",
+            LOG_CHAT_VLLM_RESPONSE,
             choice.get("finish_reason"),
             safe_preview(message.get("content")),
             safe_preview(message.get("reasoning")),
@@ -356,7 +527,7 @@ async def _stream_chat_ollama_events(
     start_ns: int,
     include_reasoning: bool = False,
 ):
-    url = f"{target['base_url'].rstrip('/')}/chat/completions"
+    url = f"{target['base_url'].rstrip('/')}{OPENAI_CHAT_COMPLETIONS_PATH}"
     final_reason = "stop"
 
     try:
@@ -438,7 +609,7 @@ async def _stream_chat_ui_events(
     public_model: str,
     include_reasoning: bool = False,
 ):
-    url = f"{target['base_url'].rstrip('/')}/chat/completions"
+    url = f"{target['base_url'].rstrip('/')}{OPENAI_CHAT_COMPLETIONS_PATH}"
     total_text = ""
     terminal_emitted = False
 
@@ -521,7 +692,7 @@ async def api_chat_ui(request: Request) -> Any:
     requested_model = body_data.get("model")
     target = await _resolve_target_from_status_cache(requested_model, expected_type="chat")
     if target is None:
-        raise HTTPException(status_code=503, detail="no chat models registered in status cache")
+        raise HTTPException(status_code=503, detail=ERR_NO_CHAT_MODELS)
     model = requested_model or target["public_model"]
 
     messages: List[Dict[str, Any]] = body_data.get("messages", [])
@@ -537,6 +708,12 @@ async def api_chat_ui(request: Request) -> Any:
 
     if not messages:
         messages = [{"role": "user", "content": CHAT_EMPTY_FALLBACK_USER_TEXT}]
+
+    has_images = _messages_have_images(messages)
+    if has_images and not _vision_supported(target):
+        raise HTTPException(status_code=400, detail=ERR_MODEL_DOES_NOT_SUPPORT_VISION_FMT.format(model=model))
+    if has_images:
+        messages = _to_multimodal_messages(messages)
 
     messages = inject_system_language_prompt(messages)
     estimated_input_tokens = estimate_chat_input_tokens(messages)
@@ -561,7 +738,7 @@ async def api_chat_ui(request: Request) -> Any:
     payload["stream"] = stream
     reasoning_flag = _extract_reasoning_flag(body_data)
     if reasoning_flag is not None and not _reasoning_supported(target):
-        raise HTTPException(status_code=400, detail=f"model does not support reasoning toggle: {model}")
+        raise HTTPException(status_code=400, detail=ERR_MODEL_DOES_NOT_SUPPORT_REASONING_FMT.format(model=model))
     if _reasoning_supported(target):
         if reasoning_flag is not None:
             payload["chat_template_kwargs"] = {"enable_thinking": reasoning_flag}
@@ -569,13 +746,13 @@ async def api_chat_ui(request: Request) -> Any:
             payload["chat_template_kwargs"] = {"enable_thinking": False}
 
     if stream and not _stream_supported(target):
-        raise HTTPException(status_code=400, detail=f"model does not support stream mode: {model}")
+        raise HTTPException(status_code=400, detail=ERR_MODEL_DOES_NOT_SUPPORT_STREAM_FMT.format(model=model))
 
     await _ensure_model_available(target)
 
     if CHAT_DEBUG_LOG:
         logger.info(
-            "chat.ui.adapted model=%s route_model=%s base_url=%s messages=%s est_input_tokens=%s max_tokens=%s",
+            LOG_CHAT_UI_ADAPTED,
             model,
             target["vllm_model"],
             target["base_url"],
@@ -586,7 +763,7 @@ async def api_chat_ui(request: Request) -> Any:
 
     if not stream:
         start_ns = ns()
-        data = await _post_json_to(target["base_url"], "/chat/completions", payload)
+        data = await _post_json_to(target["base_url"], OPENAI_CHAT_COMPLETIONS_PATH, payload)
         content = strip_reasoning_prefix(extract_chat_text(data))
         done_reason = extract_finish_reason(data)
         return ollama_response(model, content, start_ns, done_reason=done_reason)
@@ -610,7 +787,7 @@ async def api_generate(request: Request) -> Dict[str, Any]:
     requested_model = body_data.get("model")
     target = await _resolve_target_from_status_cache(requested_model, expected_type="chat")
     if target is None:
-        raise HTTPException(status_code=503, detail="no chat models registered in status cache")
+        raise HTTPException(status_code=503, detail=ERR_NO_CHAT_MODELS)
     await _ensure_model_available(target)
     model = requested_model or target["public_model"]
     prompt: str = str(body_data.get("prompt", ""))
@@ -633,13 +810,17 @@ async def api_generate(request: Request) -> Dict[str, Any]:
     _maybe_raise_strict_token_budget_error(model, token_budget)
     payload = {
         "model": target["vllm_model"],
-        "prompt": prompt,
+        "messages": [
+            {"role": "user", "content": prompt},
+        ],
         "temperature": body_data.get("temperature", 0.7),
         "max_tokens": int(token_budget["resolved_max_tokens"]),
+        "stream": False,
         # /api/generate is always no-reasoning for deterministic output contract.
         "chat_template_kwargs": {"enable_thinking": False},
     }
-    data = await _post_json_to(target["base_url"], "/completions", payload)
-    content = strip_reasoning_prefix(data["choices"][0]["text"])
+    data = await _post_json_to(target["base_url"], OPENAI_CHAT_COMPLETIONS_PATH, payload)
+    # Generate must never expose chain-of-thought to callers.
+    content = strip_reasoning_artifacts(extract_chat_text(data))
     done_reason = extract_finish_reason(data)
     return ollama_response(model, content, start_ns, done_reason=done_reason)

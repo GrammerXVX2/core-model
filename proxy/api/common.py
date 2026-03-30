@@ -1,4 +1,5 @@
 import json
+import re
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List
@@ -70,9 +71,26 @@ def estimate_input_tokens_from_text(text: str) -> int:
 
 
 def estimate_chat_input_tokens(messages: List[Dict[str, str]]) -> int:
+    def _content_to_text(content: Any) -> str:
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: List[str] = []
+            for item in content:
+                if isinstance(item, dict):
+                    if item.get("type") == "text" and item.get("text") is not None:
+                        parts.append(str(item.get("text")))
+                elif isinstance(item, str):
+                    parts.append(item)
+            return "\n".join(parts)
+        if isinstance(content, dict):
+            text = content.get("text")
+            return str(text) if text is not None else ""
+        return ""
+
     total = 0
     for msg in messages:
-        total += estimate_input_tokens_from_text(str(msg.get("content", "")))
+        total += estimate_input_tokens_from_text(_content_to_text(msg.get("content", "")))
         total += 8
     return total + 16
 
@@ -190,6 +208,14 @@ def strip_reasoning_prefix(text: str) -> str:
             parts = cleaned.split("\n\n", 1)
             cleaned = parts[1] if len(parts) == 2 else cleaned
     return cleaned.strip()
+
+
+def strip_reasoning_artifacts(text: str) -> str:
+    if not text:
+        return text
+    # Remove explicit reasoning blocks some models emit in completion mode.
+    cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.IGNORECASE | re.DOTALL)
+    return strip_reasoning_prefix(cleaned)
 
 
 def now_iso() -> str:
