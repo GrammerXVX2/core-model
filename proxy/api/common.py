@@ -226,10 +226,17 @@ def ns() -> int:
     return time.perf_counter_ns()
 
 
-def ollama_response(model: str, content: str, start_ns: int, load_ns: int = 0, done_reason: str = "stop") -> Dict[str, Any]:
+def ollama_response(
+    model: str,
+    content: str,
+    start_ns: int,
+    load_ns: int = 0,
+    done_reason: str = "stop",
+    logprobs: List[Dict[str, Any]] | None = None,
+) -> Dict[str, Any]:
     end_ns = ns()
     total_ns = max(0, end_ns - start_ns)
-    return {
+    result = {
         "model": model,
         "created_at": now_iso(),
         "response": content,
@@ -242,6 +249,9 @@ def ollama_response(model: str, content: str, start_ns: int, load_ns: int = 0, d
         "eval_count": 0,
         "eval_duration": 0,
     }
+    if logprobs is not None:
+        result["logprobs"] = logprobs
+    return result
 
 
 def sse_event(payload: Dict[str, Any]) -> str:

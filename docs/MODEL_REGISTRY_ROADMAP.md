@@ -225,12 +225,10 @@ How status is tracked
 ### Seed targets from current environment
 - Chat routes:
   - QWEN chat: QWEN_CHAT_MODEL / QWEN_CHAT_BASE_URL / PUBLIC_QWEN_CHAT_MODEL
-  - MINISTRAL chat: MINISTRAL_CHAT_MODEL / MINISTRAL_CHAT_BASE_URL / PUBLIC_MINISTRAL_CHAT_MODEL
   - CPU Q4 chat: CPU_CHAT_Q4_MODEL / CPU_CHAT_Q4_BASE_URL / PUBLIC_CPU_CHAT_Q4_MODEL
   - CPU Q6 chat: CPU_CHAT_Q6_MODEL / CPU_CHAT_Q6_BASE_URL / PUBLIC_CPU_CHAT_Q6_MODEL
 - Embedding routes:
   - QWEN embed default: QWEN_EMBED_MODEL / QWEN_EMBED_BASE_URL / PUBLIC_QWEN_EMBED_MODEL
-  - QWEN embed 8B: QWEN_EMBED_8B_MODEL / QWEN_EMBED_8B_BASE_URL / PUBLIC_QWEN_EMBED_8B_MODEL
   - QWEN embed 4B: QWEN_EMBED_4B_MODEL / QWEN_EMBED_4B_BASE_URL / PUBLIC_QWEN_EMBED_4B_MODEL
 
 ### Mapping rules: model_registry
@@ -240,10 +238,10 @@ How status is tracked
 - public_name: PUBLIC_* env value (fallback to backend_model_id)
 - backend_model_id: *_MODEL env value
 - backend_type:
-  - vllm for qwen/ministral routes on /v1-compatible servers
+  - vllm for qwen routes on /v1-compatible servers
   - llama_cpp for CPU Q4/Q6 routes
 - model_type:
-  - chat for QWEN_CHAT, MINISTRAL_CHAT, CPU_CHAT_Q4, CPU_CHAT_Q6
+  - chat for QWEN_CHAT, CPU_CHAT_Q4, CPU_CHAT_Q6
   - embeddings for QWEN_EMBED*
 - base_url: *_BASE_URL env value normalized with rstrip('/').
 - is_enabled: true for all seeded records
@@ -254,10 +252,9 @@ How status is tracked
 ### Mapping rules: model_runtime_config
 - max_context_tokens:
   - QWEN_CHAT_MAX_CONTEXT_TOKENS (QWEN chat)
-  - MINISTRAL_CHAT_MAX_CONTEXT_TOKENS (Ministral chat)
   - CPU_CHAT_Q4_MAX_CONTEXT_TOKENS (CPU Q4)
   - CPU_CHAT_Q6_MAX_CONTEXT_TOKENS (CPU Q6)
-  - QWEN_EMBED_MAX_CONTEXT_TOKENS / QWEN_EMBED_8B_MAX_CONTEXT_TOKENS / QWEN_EMBED_4B_MAX_CONTEXT_TOKENS (embeddings)
+  - QWEN_EMBED_MAX_CONTEXT_TOKENS / QWEN_EMBED_4B_MAX_CONTEXT_TOKENS (embeddings)
 - default_max_tokens: VLLM_DEFAULT_MAX_TOKENS
 - max_tokens_cap: VLLM_MAX_TOKENS_CAP
 - min_context_headroom: VLLM_MIN_CONTEXT_HEADROOM
@@ -279,9 +276,8 @@ How status is tracked
 ### Mapping rules: model_metadata
 - family/families:
   - qwen for QWEN*
-  - mistral for MINISTRAL*
 - parameter_size:
-  - parse from model string (e.g. 9B, 14B, 8B, 4B)
+  - parse from model string (e.g. 122B, 9B, 4B)
 - quantization_level:
   - Q4_K_M for CPU_CHAT_Q4_MODEL
   - Q6_K for CPU_CHAT_Q6_MODEL

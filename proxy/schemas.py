@@ -1,4 +1,4 @@
-from typing import Any, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -39,17 +39,27 @@ class GenerateRequestModel(BaseModel):
     temperature: float = Field(default=0.7, description="Sampling temperature.")
     max_tokens: Optional[int] = Field(default=None, description="Requested max output tokens.")
     stream: bool = Field(default=False, description="Streaming is currently not supported on /api/generate.")
+    raw: Optional[bool] = Field(default=False, description="When true, prompt is not wrapped with system message and chat template.")
+    logprobs: Optional[bool] = Field(default=False, description="Enable logprobs output (for reranker models).")
+    top_logprobs: Optional[int] = Field(default=None, description="Number of top logprobs to return per token.")
     options: Optional[ChatOptions] = Field(default=None, description="Ollama options.")
 
 
 class EmbedRequestModel(BaseModel):
     model_config = ConfigDict(extra="allow")
-    model: Optional[str] = Field(default=None, description="Optional embedding model alias (for example 4B or 8B route).")
+    model: Optional[str] = Field(default=None, description="Optional embedding model alias (for example qwen-embed-4b-tei).")
     input: Optional[Any] = Field(
         default=None,
         description="Input text or list of texts for embedding.",
         examples=["Ошибка 502 при оплате картой"],
     )
+
+
+class LogprobsItem(BaseModel):
+    """Single token logprob info (Ollama compatible)."""
+    token: str
+    logprob: float
+    top_logprobs: Optional[Dict[str, float]] = Field(default=None, description="Top token alternatives with logprobs.")
 
 
 class OllamaTextResponseModel(BaseModel):
@@ -64,6 +74,7 @@ class OllamaTextResponseModel(BaseModel):
     prompt_eval_duration: int
     eval_count: int
     eval_duration: int
+    logprobs: Optional[List[LogprobsItem]] = Field(default=None, description="Token logprobs (when requested).")
 
 
 class EmbedResponseModel(BaseModel):

@@ -16,6 +16,7 @@ from constants import (
     LOG_CHAT_UI_ADAPTED,
     LOG_CHAT_VLLM_RESPONSE,
     OPENAI_CHAT_COMPLETIONS_PATH,
+    OPENAI_COMPLETIONS_PATH,
 )
 
 from schemas import OllamaTextResponseModel
@@ -289,7 +290,7 @@ GENERATE_OPENAPI_EXTRA = {
             "application/json": {
                 "examples": {
                     "qwen_generate": {
-                        "summary": "Qwen generate route",
+                        "summary": "Qwen chat route",
                         "value": {
                             "model": os.getenv("OPENAPI_GENERATE_EXAMPLE_MODEL", "Qwen3.5-122B-A10B-FP8"),
                             "prompt": os.getenv(
@@ -300,7 +301,7 @@ GENERATE_OPENAPI_EXTRA = {
                         },
                     },
                     "alt_generate": {
-                        "summary": "Alternative generate route",
+                        "summary": "Alternative chat route",
                         "value": {
                             "model": os.getenv(
                                 "OPENAPI_ALT_GENERATE_EXAMPLE_MODEL",
@@ -310,9 +311,79 @@ GENERATE_OPENAPI_EXTRA = {
                             "temperature": 0.2,
                         },
                     },
+                    "reranker": {
+                        "summary": "Reranker route (logprobs)",
+                        "value": {
+                            "model": "qwen-reranker-4b",
+                            "prompt": "<|im_start|>system\nJudge whether the Document meets the requirements based on the Query. Note that the answer can only be 'yes' or 'no'.<|im_end|>\n<|im_start|>user\n<Query>: Как приготовить кофе?\n<Document>: Для приготовления кофе возьмите свежеобжаренные зерна и чистую воду.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+                            "raw": True,
+                            "logprobs": True,
+                            "top_logprobs": 5,
+                            "options": {
+                                "num_predict": 1,
+                                "temperature": 0
+                            }
+                        },
+                    },
                 },
             }
         },
+    },
+    "responses": {
+        "200": {
+            "description": "Successful response",
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "qwen_response": {
+                            "summary": "Chat model response",
+                            "value": {
+                                "model": "Qwen3.5-122B-A10B-FP8",
+                                "created_at": "2026-03-31T08:45:39.829299Z",
+                                "response": "OAuth2 в FastAPI реализуется через встроенные классы безопасности, которые автоматически обрабатывают токены и проверяют авторизацию.",
+                                "done": True,
+                                "done_reason": "stop",
+                                "total_duration": 125000000,
+                                "load_duration": 0,
+                                "prompt_eval_count": 15,
+                                "prompt_eval_duration": 50000000,
+                                "eval_count": 35,
+                                "eval_duration": 75000000
+                            }
+                        },
+                        "reranker_response": {
+                            "summary": "Reranker response (with logprobs)",
+                            "value": {
+                                "model": "qwen-reranker-4b",
+                                "created_at": "2026-03-31T08:45:39.829299Z",
+                                "response": "yes",
+                                "done": True,
+                                "done_reason": "length",
+                                "total_duration": 35297616,
+                                "load_duration": 0,
+                                "prompt_eval_count": 0,
+                                "prompt_eval_duration": 0,
+                                "eval_count": 0,
+                                "eval_duration": 0,
+                                "logprobs": [
+                                    {
+                                        "token": "yes",
+                                        "logprob": -0.46566927433013916,
+                                        "top_logprobs": {
+                                            "yes": -0.46566927433013916,
+                                            "no": -3.5906691551208496,
+                                            "Yes": -4.59066915512085,
+                                            "true": -5.46566915512085,
+                                            "y": -5.52816915512085
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -791,13 +862,73 @@ async def api_generate(request: Request) -> Dict[str, Any]:
     await _ensure_model_available(target)
     model = requested_model or target["public_model"]
     prompt: str = str(body_data.get("prompt", ""))
-    prompt = f"{language_instruction()}\n\n{prompt}".strip()
     stream = bool(body_data.get("stream", False))
+    raw_mode = bool(body_data.get("raw", False))
+    logprobs_enabled = bool(body_data.get("logprobs", False))
+    top_logprobs_count = body_data.get("top_logprobs")
 
     if stream:
         raise HTTPException(status_code=501, detail="stream not implemented")
 
     start_ns = ns()
+
+    # For raw mode (reranker), use /v1/completions endpoint with raw prompt
+    if raw_mode:
+        estimated_input_tokens = estimate_input_tokens_from_text(prompt) + 16
+        token_budget = analyze_max_tokens_budget(
+            body_data,
+            estimated_input_tokens=estimated_input_tokens,
+            max_context_tokens=target.get("max_context_tokens"),
+            max_tokens_cap=target.get("max_tokens_cap"),
+            min_context_headroom=target.get("min_context_headroom"),
+            default_max_tokens=target.get("default_max_tokens"),
+        )
+        _maybe_raise_strict_token_budget_error(model, token_budget)
+        
+        payload = {
+            "model": target["vllm_model"],
+            "prompt": prompt,
+            "temperature": body_data.get("temperature", 0.7),
+            "max_tokens": int(token_budget["resolved_max_tokens"]),
+            "stream": False,
+        }
+        
+        # Add logprobs parameters if requested (for reranker)
+        if logprobs_enabled:
+            payload["logprobs"] = top_logprobs_count if top_logprobs_count is not None else 1
+        
+        data = await _post_json_to(target["base_url"], OPENAI_COMPLETIONS_PATH, payload)
+        
+        # Extract text from completions response
+        choice = (data.get("choices") or [{}])[0]
+        content = choice.get("text", "")
+        done_reason = choice.get("finish_reason", "stop")
+        
+        # Extract logprobs if present and convert to Ollama format
+        vllm_logprobs = None
+        if logprobs_enabled and "logprobs" in choice:
+            logprobs_data = choice.get("logprobs") or {}
+            tokens = logprobs_data.get("tokens", [])
+            token_logprobs = logprobs_data.get("token_logprobs", [])
+            top_logprobs_list = logprobs_data.get("top_logprobs", [])
+            
+            if tokens and token_logprobs:
+                vllm_logprobs = []
+                for idx, (token, logprob) in enumerate(zip(tokens, token_logprobs)):
+                    if logprob is not None:  # vLLM may return None for first token
+                        item = {
+                            "token": token,
+                            "logprob": float(logprob),
+                        }
+                        # Include top_logprobs if available for this token
+                        if idx < len(top_logprobs_list) and top_logprobs_list[idx]:
+                            item["top_logprobs"] = {k: float(v) for k, v in top_logprobs_list[idx].items()}
+                        vllm_logprobs.append(item)
+        
+        return ollama_response(model, content, start_ns, done_reason=done_reason, logprobs=vllm_logprobs)
+    
+    # Standard mode (chat-style LLM generation)
+    prompt = f"{language_instruction()}\n\n{prompt}".strip()
     estimated_input_tokens = estimate_input_tokens_from_text(prompt) + 16
     token_budget = analyze_max_tokens_budget(
         body_data,
